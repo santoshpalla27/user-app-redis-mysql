@@ -12,7 +12,7 @@ services:
     networks:
       - app-network
     environment:
-      - REACT_APP_API_URL=http://3.88.64.82:5000
+      - REACT_APP_API_URL=http://13.218.23.17:5000
       - WDS_SOCKET_PORT=0
     volumes:
       - ./frontend:/app
@@ -41,6 +41,11 @@ services:
     volumes:
       - ./backend:/usr/src/app
       - /usr/src/app/node_modules
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5 
 
   # MySQL Database
   mysql:
