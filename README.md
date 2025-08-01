@@ -103,3 +103,6 @@ docker exec -it redis-node-0 redis-cli -c -a bitnami123 CLUSTER NODES
 
 
 docker exec -it redis-node-0 redis-cli -c -h 127.0.0.1 -p 6379 -a bitnami123 keys '*'
+
+
+working when started at first
