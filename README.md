@@ -90,3 +90,16 @@ docker-compose down
 ## Redis Cluster
 
 The application uses a 6-node Redis Cluster with 3 master nodes and 3 replica nodes for high availability and data sharding. The cluster is initialized automatically by the `cluster-init` service in the Docker Compose file.
+
+
+
+
+
+commands to find the status of the redis cluster 
+ 
+docker exec -it redis-node-0 redis-cli -c -a bitnami123 CLUSTER INFO
+docker exec -it redis-node-0 redis-cli -c -a bitnami123 CLUSTER SLOTS
+docker exec -it redis-node-0 redis-cli -c -a bitnami123 CLUSTER NODES
+
+
+docker exec -it redis-node-0 redis-cli -c -h 127.0.0.1 -p 6379 -a bitnami123 keys '*'

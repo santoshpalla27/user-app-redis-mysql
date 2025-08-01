@@ -3,6 +3,7 @@ const mysql = require('mysql2/promise');
 const redis = require('redis');
 const cors = require('cors');
 const dotenv = require('dotenv');
+const { randomUUID } = require('crypto');
 
 dotenv.config();
 
@@ -56,39 +57,57 @@ const initRedis = async () => {
       const client = redis.createClient({
         url: `redis://:${redisPassword}@${node.host}:${node.port}`
       });
-      
-      // Set up error handling
+
       client.on('error', (err) => {
         console.error(`Redis node ${node.host}:${node.port} error:`, err);
       });
-      
-      // Connect to the node
+
       await client.connect();
       console.log(`Connected to Redis node ${node.host}:${node.port}`);
-      
-      // Store node info with the client
+
       client.nodeInfo = node;
       redisStandaloneClients.push(client);
     }
-    
-    // Create cluster client
-    redisClusterClient = redis.createCluster({
-      rootNodes: redisNodes.map(node => ({ 
-        url: `redis://${node.host}:${node.port}` 
-      })),
-      defaults: {
-        password: redisPassword
+
+    // Retry logic for Redis Cluster connection
+    let retries = 10;
+    const delay = 2000;
+
+    while (retries > 0) {
+      try {
+        redisClusterClient = redis.createCluster({
+          rootNodes: redisNodes.map(node => ({
+            url: `redis://${node.host}:${node.port}`
+          })),
+          defaults: {
+            password: redisPassword
+          }
+        });
+
+        redisClusterClient.on('error', err => {
+          console.error('❌ Redis Cluster Error:', err);
+        });
+
+        await redisClusterClient.connect();
+        console.log('✅ Connected to Redis Cluster!');
+        redisConnected = true;
+        break;
+      } catch (err) {
+        console.error(`Error connecting to Redis Cluster (${retries} retries left):`, err.message);
+        retries--;
+        await new Promise(res => setTimeout(res, delay));
       }
-    });
-    
-    await redisClusterClient.connect();
-    console.log('Connected to Redis Cluster!');
-    
-    redisConnected = true;
+    }
+
+    if (!redisConnected) {
+      console.error('❌ Could not connect to Redis Cluster after multiple attempts.');
+    }
+
   } catch (err) {
     console.error('Redis connection error:', err);
   }
 };
+
 
 // Test database connections on startup
 app.listen(PORT, async () => {
@@ -336,7 +355,7 @@ function setupRoutes() {
     }
   });
 
-  // Create a user in Redis
+  // Create a user in Redis - FIXED WITH UUID
   app.post('/api/redis/users', async (req, res) => {
     if (!redisConnected) {
       return res.status(503).json({ error: 'Redis connection not available' });
@@ -364,8 +383,9 @@ function setupRoutes() {
         }
       }
       
-      // Generate a unique ID
-      const id = Date.now().toString();
+      // Generate a truly unique ID using UUID instead of timestamp
+      const id = randomUUID();
+      
       const userData = {
         name,
         email,
@@ -547,14 +567,101 @@ function setupRoutes() {
       res.status(500).json({ error: 'Operation failed' });
     }
   });
+
+  // Cleanup endpoint to fix duplicate IDs - NEW ENDPOINT
+  app.post('/api/redis/cleanup-duplicates', async (req, res) => {
+    if (!redisConnected) {
+      return res.status(503).json({ error: 'Redis connection not available' });
+    }
+    
+    try {
+      // Get all user keys from all nodes
+      const keys = await getAllKeysFromCluster('user:*');
+      const users = [];
+      const seenEmails = new Set();
+      const duplicates = [];
+      
+      // Collect all users and identify duplicates
+      for (const key of keys) {
+        try {
+          const userData = await redisClusterClient.hGetAll(key);
+          if (Object.keys(userData).length > 0) {
+            const user = {
+              key,
+              id: key.split(':')[1],
+              ...userData
+            };
+            
+            if (seenEmails.has(userData.email)) {
+              duplicates.push(user);
+            } else {
+              seenEmails.add(userData.email);
+              users.push(user);
+            }
+          }
+        } catch (err) {
+          console.error(`Error fetching data for key ${key}:`, err);
+        }
+      }
+      
+      // Remove duplicates and reassign with new IDs if needed
+      let cleanedCount = 0;
+      for (const duplicate of duplicates) {
+        try {
+          // Delete the duplicate
+          await redisClusterClient.del(duplicate.key);
+          cleanedCount++;
+        } catch (err) {
+          console.error(`Error deleting duplicate ${duplicate.key}:`, err);
+        }
+      }
+      
+      // Reassign IDs to remaining users if they're using timestamp-based IDs
+      let reassignedCount = 0;
+      for (const user of users) {
+        // Check if ID looks like a timestamp (all digits)
+        if (/^\d+$/.test(user.id)) {
+          try {
+            const newId = randomUUID();
+            const newKey = `user:${newId}`;
+            
+            // Copy to new key
+            await redisClusterClient.hSet(newKey, {
+              name: user.name,
+              email: user.email,
+              phone: user.phone || '',
+              address: user.address || '',
+              created_at: user.created_at || new Date().toISOString()
+            });
+            
+            // Delete old key
+            await redisClusterClient.del(user.key);
+            reassignedCount++;
+          } catch (err) {
+            console.error(`Error reassigning ID for ${user.key}:`, err);
+          }
+        }
+      }
+      
+      res.json({
+        message: 'Cleanup completed',
+        duplicatesRemoved: cleanedCount,
+        idsReassigned: reassignedCount,
+        totalProcessed: keys.length
+      });
+    } catch (err) {
+      console.error('Error during cleanup:', err);
+      res.status(500).json({ error: 'Cleanup failed' });
+    }
+  });
 }
+
 
 // Graceful shutdown
 process.on('SIGINT', async () => {
   console.log('Shutting down server...');
-  
+
   try {
-    // Close all Redis standalone clients
     if (redisStandaloneClients.length > 0) {
       for (const client of redisStandaloneClients) {
         if (client.isOpen) {
@@ -563,17 +670,15 @@ process.on('SIGINT', async () => {
       }
       console.log('Redis standalone clients disconnected');
     }
-    
-    // Close Redis cluster client
+
     if (redisClusterClient && redisClusterClient.isOpen) {
       await redisClusterClient.quit();
       console.log('Redis cluster client disconnected');
     }
-    
-    // Close MySQL connections
+
     await mysqlPool.end();
     console.log('MySQL pool closed');
-    
+
     process.exit(0);
   } catch (err) {
     console.error('Error during shutdown:', err);
