@@ -73,8 +73,17 @@ const initRedis = async () => {
         });
         redisClusterClient.on('error', err => console.error('❌ Redis Cluster Error:', err));
         await redisClusterClient.connect();
+
+        // 🧠 Ensure Redis slots are mapped correctly
+        if (typeof redisClusterClient.refreshSlotsCache === 'function') {
+          await redisClusterClient.refreshSlotsCache(); // Force slot map refresh
+          console.log('✅ Redis slot cache refreshed');
+        }
+
+        // Optional: delay to ensure Redis is ready
+        await new Promise(res => setTimeout(res, 2000));
+
         console.log('✅ Connected to Redis Cluster!');
-        await new Promise(res => setTimeout(res, 2000)); // ensure slot map
         redisConnected = true;
         break;
       } catch (err) {
@@ -89,6 +98,7 @@ const initRedis = async () => {
     console.error('Redis connection error:', err);
   }
 };
+
 
 async function getAllKeysFromCluster(pattern) {
   if (!redisConnected || redisStandaloneClients.length === 0) return [];
