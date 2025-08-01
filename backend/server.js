@@ -62,42 +62,51 @@ const initRedis = async () => {
       redisStandaloneClients.push(client);
     }
 
-    let retries = 10;
-    const delay = 2000;
-
+    let retries = 5;
     while (retries > 0) {
       try {
         redisClusterClient = redis.createCluster({
           rootNodes: redisNodes.map(node => ({ url: `redis://${node.host}:${node.port}` })),
           defaults: { password: redisPassword }
         });
+
         redisClusterClient.on('error', err => console.error('❌ Redis Cluster Error:', err));
         await redisClusterClient.connect();
 
-        // 🧠 Ensure Redis slots are mapped correctly
+        // 🧠 Manually trigger slot cache loading
         if (typeof redisClusterClient.refreshSlotsCache === 'function') {
-          await redisClusterClient.refreshSlotsCache(); // Force slot map refresh
-          console.log('✅ Redis slot cache refreshed');
+          await redisClusterClient.refreshSlotsCache();
+          console.log('✅ Redis slot cache loaded.');
         }
 
-        // Optional: delay to ensure Redis is ready
+        // 🧪 Optional: Send a dummy command to trigger actual slot map initialization
+        try {
+          await redisClusterClient.get('dummy_key');
+        } catch (err) {
+          console.warn('Initial dummy GET failed (likely key doesn’t exist, which is okay):', err.message);
+        }
+
+        // 💤 Wait a bit before issuing actual hSet/hGet/etc.
         await new Promise(res => setTimeout(res, 2000));
 
-        console.log('✅ Connected to Redis Cluster!');
         redisConnected = true;
+        console.log('✅ Connected to Redis Cluster and ready!');
         break;
       } catch (err) {
-        console.error(`Error connecting to Redis Cluster (${retries} retries left):`, err.message);
+        console.error(`⚠️ Retry Redis Cluster Connect (${retries} left):`, err.message);
         retries--;
-        await new Promise(res => setTimeout(res, delay));
+        await new Promise(res => setTimeout(res, 2000));
       }
     }
 
-    if (!redisConnected) console.error('❌ Could not connect to Redis Cluster after multiple attempts.');
+    if (!redisConnected) {
+      console.error('❌ Could not initialize Redis Cluster after retries.');
+    }
   } catch (err) {
-    console.error('Redis connection error:', err);
+    console.error('❌ Redis connection error:', err);
   }
 };
+
 
 
 async function getAllKeysFromCluster(pattern) {
