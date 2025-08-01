@@ -28,7 +28,7 @@ const mysqlPool = mysql.createPool({
   queueLimit: 0
 });
 
-// Parse Redis nodes from env
+// Parse Redis nodes from environment
 const redisNodes = (process.env.REDIS_NODES ||
   'redis-node-0:6379,redis-node-1:6379,redis-node-2:6379,redis-node-3:6379,redis-node-4:6379,redis-node-5:6379')
   .split(',')
@@ -37,18 +37,19 @@ const redisNodes = (process.env.REDIS_NODES ||
     return { host, port: parseInt(port, 10) };
   });
 
+// Redis password
 const redisPassword = process.env.REDIS_PASSWORD || 'bitnami123';
 
-// Standalone Redis clients (per node, for keys scanning)
+// Standalone Redis clients (for keys scanning)
 const redisStandaloneClients = [];
 
 let redisClusterClient = null;
 let redisConnected = false;
 
-// Helper wait/delay
-const wait = ms => new Promise(res => setTimeout(res, ms));
+// Utility: delay helper
+const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
 
-// Dispose current cluster client properly
+// Dispose existing cluster client safely
 async function disposeClusterClient() {
   try {
     if (redisClusterClient && redisClusterClient.isOpen) {
@@ -62,7 +63,7 @@ async function disposeClusterClient() {
   }
 }
 
-// Initialize Redis Cluster client with retries
+// Create and connect Redis cluster client with delay for stability
 async function createClusterClient() {
   await disposeClusterClient();
 
@@ -82,7 +83,6 @@ async function createClusterClient() {
 
   await client.connect();
 
-  // Delay to allow cluster topology stabilization
   console.log('Connected to Redis Cluster, waiting 15 seconds for cluster topology stabilization...');
   await wait(15000);
 
@@ -92,9 +92,8 @@ async function createClusterClient() {
   return client;
 }
 
-// Initialize Redis clients (standalone + cluster)
+// Initialize standalone and cluster Redis clients
 const initRedis = async () => {
-  // Connect standalone clients if not yet
   if (redisStandaloneClients.length === 0) {
     for (const node of redisNodes) {
       const client = redis.createClient({
@@ -111,7 +110,7 @@ const initRedis = async () => {
   redisClusterClient = await createClusterClient();
 };
 
-// Redis cluster command wrapper with reconnect + retries on slot cache errors
+// Wrapper for Redis cluster commands with retries and reconnects on slot errors
 async function redisClusterCommandWrapper(commandFn, maxRetries = 5, delayMs = 3000) {
   if (!redisConnected || !redisClusterClient || !redisClusterClient.isOpen) {
     throw new Error('Redis cluster client is not connected');
@@ -119,40 +118,35 @@ async function redisClusterCommandWrapper(commandFn, maxRetries = 5, delayMs = 3
 
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
-      // Diagnostic logging before command
-      console.log(`Redis cluster command attempt ${attempt} - slots cache size:`, redisClusterClient.slots?.size);
+      console.log(`Redis cluster command attempt ${attempt}.`);
       return await commandFn(redisClusterClient);
     } catch (err) {
-      // Known slot cache routing errors leading to 'master' undefined
+      // Check for known cluster slot/connection errors
       if (
         err.message.includes("Cannot read properties of undefined (reading 'master')") ||
         err.message.includes('Slot is not served by any node') ||
         err.message.includes('CLUSTERDOWN')
       ) {
         console.warn(`Redis cluster slot error on attempt ${attempt}: ${err.message}`);
-        // Try reconnecting cluster client to refresh all cache/state
         try {
-          console.log('Attempting to reconnect Redis cluster client to refresh slot cache...');
+          console.log('Reconnecting Redis cluster client to refresh slot cache and state...');
           await disposeClusterClient();
           redisClusterClient = await createClusterClient();
           await wait(delayMs);
         } catch (reconnectErr) {
           console.error('Error reconnecting Redis cluster client:', reconnectErr);
-          // If reconnect failed, throw or delay and retry
           if (attempt === maxRetries) throw reconnectErr;
           await wait(delayMs);
         }
-        continue; // retry command
+        continue; // Retry after reconnect
       }
-      // For other errors, re-throw immediately
-      throw err;
+      throw err; // Unexpected errors
     }
   }
-
   throw new Error('Max Redis cluster retries exceeded');
 }
 
-// Helper to scan keys across standalone clients
+// Helper: scan keys across all standalone clients
 async function getAllKeysFromCluster(pattern) {
   if (!redisConnected || redisStandaloneClients.length === 0) return [];
   const allKeys = [];
@@ -179,7 +173,7 @@ app.listen(PORT, async () => {
     console.error('Redis initialization failed:', err);
   }
 
-  // MySQL connection retries
+  // MySQL connection retry logic
   let mysqlConnected = false;
   let retries = 10;
   while (!mysqlConnected && retries > 0) {
@@ -195,7 +189,7 @@ app.listen(PORT, async () => {
     }
   }
 
-  // --- API endpoints (MySQL, Redis) ---
+  // --- APIs ---
 
   app.get('/api/health', (req, res) => {
     const redisNodesStatus = redisStandaloneClients.map(client => ({
@@ -212,25 +206,25 @@ app.listen(PORT, async () => {
     });
   });
 
-  // MySQL CRUD (same as before)...
+  // MySQL CRUD APIs (unchanged from previous)
 
   app.get('/api/mysql/users', async (req, res) => {
     try {
       const [rows] = await mysqlPool.query('SELECT * FROM users');
       res.json(rows);
-    } catch (e) {
-      console.error('MySQL fetch error:', e);
+    } catch (err) {
+      console.error('MySQL users fetch error:', err);
       res.status(500).json({ error: 'Database error' });
     }
   });
 
   app.get('/api/mysql/users/:id', async (req, res) => {
     try {
-      const [rows] = await mysqlPool.query('SELECT * FROM users WHERE id=?', [req.params.id]);
+      const [rows] = await mysqlPool.query('SELECT * FROM users WHERE id = ?', [req.params.id]);
       if (rows.length === 0) return res.status(404).json({ error: 'User not found' });
       res.json(rows[0]);
-    } catch (e) {
-      console.error('MySQL fetch user error:', e);
+    } catch (err) {
+      console.error('MySQL user fetch error:', err);
       res.status(500).json({ error: 'Database error' });
     }
   });
@@ -245,9 +239,9 @@ app.listen(PORT, async () => {
         [name, email, phone, address]
       );
       res.status(201).json({ id: result.insertId, name, email, phone, address });
-    } catch (e) {
-      console.error('MySQL create user error:', e);
-      if (e.code === 'ER_DUP_ENTRY') return res.status(409).json({ error: 'Email already exists' });
+    } catch (err) {
+      console.error('MySQL create user error:', err);
+      if (err.code === 'ER_DUP_ENTRY') return res.status(409).json({ error: 'Email already exists' });
       res.status(500).json({ error: 'Database error' });
     }
   });
@@ -259,30 +253,30 @@ app.listen(PORT, async () => {
 
     try {
       const [result] = await mysqlPool.query(
-        'UPDATE users SET name=?, email=?, phone=?, address=? WHERE id=?',
+        'UPDATE users SET name = ?, email = ?, phone = ?, address = ? WHERE id = ?',
         [name, email, phone, address, userId]
       );
       if (result.affectedRows === 0) return res.status(404).json({ error: 'User not found' });
       res.json({ id: userId, name, email, phone, address });
-    } catch (e) {
-      console.error('MySQL update user error:', e);
-      if (e.code === 'ER_DUP_ENTRY') return res.status(409).json({ error: 'Email already exists' });
+    } catch (err) {
+      console.error('MySQL update user error:', err);
+      if (err.code === 'ER_DUP_ENTRY') return res.status(409).json({ error: 'Email already exists' });
       res.status(500).json({ error: 'Database error' });
     }
   });
 
   app.delete('/api/mysql/users/:id', async (req, res) => {
     try {
-      const [result] = await mysqlPool.query('DELETE FROM users WHERE id=?', [req.params.id]);
+      const [result] = await mysqlPool.query('DELETE FROM users WHERE id = ?', [req.params.id]);
       if (result.affectedRows === 0) return res.status(404).json({ error: 'User not found' });
       res.json({ message: 'User deleted successfully' });
-    } catch (e) {
-      console.error('MySQL delete user error:', e);
+    } catch (err) {
+      console.error('MySQL delete user error:', err);
       res.status(500).json({ error: 'Database error' });
     }
   });
 
-  // Redis CRUD (wrapped with redisClusterCommandWrapper)...
+  // Redis CRUD APIs (using redisClusterCommandWrapper)
 
   app.get('/api/redis/users', async (req, res) => {
     if (!redisConnected) return res.status(503).json({ error: 'Redis not connected' });
@@ -294,14 +288,16 @@ app.listen(PORT, async () => {
       for (const key of keys) {
         try {
           const userData = await redisClusterCommandWrapper(c => c.hGetAll(key));
-          if (Object.keys(userData).length > 0) users.push({ id: key.split(':')[1], ...userData });
-        } catch (e) {
-          console.error(`Redis get user error key ${key}:`, e);
+          if (Object.keys(userData).length > 0) {
+            users.push({ id: key.split(':')[1], ...userData });
+          }
+        } catch (err) {
+          console.error(`Redis get user error for key ${key}:`, err);
         }
       }
       res.json(users);
-    } catch (e) {
-      console.error('Redis fetch users error:', e);
+    } catch (err) {
+      console.error('Redis fetch users error:', err);
       res.status(500).json({ error: 'Redis error' });
     }
   });
@@ -312,8 +308,8 @@ app.listen(PORT, async () => {
       const userData = await redisClusterCommandWrapper(c => c.hGetAll(`user:${req.params.id}`));
       if (Object.keys(userData).length === 0) return res.status(404).json({ error: 'User not found' });
       res.json({ id: req.params.id, ...userData });
-    } catch (e) {
-      console.error('Redis fetch user error:', e);
+    } catch (err) {
+      console.error('Redis get user error:', err);
       res.status(500).json({ error: 'Redis error' });
     }
   });
@@ -329,24 +325,17 @@ app.listen(PORT, async () => {
         try {
           const userData = await redisClusterCommandWrapper(c => c.hGetAll(key));
           if (userData.email === email) return res.status(409).json({ error: 'Email already exists' });
-        } catch (e) {
-          console.error(`Redis check email key ${key} error:`, e);
+        } catch (err) {
+          console.error(`Redis check email key ${key} error:`, err);
         }
       }
 
       const id = randomUUID();
-      const userData = {
-        name,
-        email,
-        phone: phone || '',
-        address: address || '',
-        created_at: new Date().toISOString()
-      };
-
+      const userData = { name, email, phone: phone || '', address: address || '', created_at: new Date().toISOString() };
       await redisClusterCommandWrapper(c => c.hSet(`user:${id}`, userData));
       res.status(201).json({ id, ...userData });
-    } catch (e) {
-      console.error('Redis create user error:', e);
+    } catch (err) {
+      console.error('Redis create user error:', err);
       res.status(500).json({ error: 'Redis error' });
     }
   });
@@ -367,8 +356,8 @@ app.listen(PORT, async () => {
           try {
             const userData = await redisClusterCommandWrapper(c => c.hGetAll(key));
             if (userData.email === email) return res.status(409).json({ error: 'Email already exists' });
-          } catch (e) {
-            console.error(`Redis check email key ${key} error:`, e);
+          } catch (err) {
+            console.error(`Redis check email key ${key} error:`, err);
           }
         }
       }
@@ -376,8 +365,8 @@ app.listen(PORT, async () => {
       const userData = { name, email, phone: phone || '', address: address || '' };
       await redisClusterCommandWrapper(c => c.hSet(`user:${userId}`, userData));
       res.json({ id: userId, ...userData });
-    } catch (e) {
-      console.error('Redis update user error:', e);
+    } catch (err) {
+      console.error('Redis update user error:', err);
       res.status(500).json({ error: 'Redis error' });
     }
   });
@@ -389,8 +378,8 @@ app.listen(PORT, async () => {
       if (!exists) return res.status(404).json({ error: 'User not found' });
       await redisClusterCommandWrapper(c => c.del(`user:${req.params.id}`));
       res.json({ message: 'User deleted successfully' });
-    } catch (e) {
-      console.error('Redis delete user error:', e);
+    } catch (err) {
+      console.error('Redis delete user error:', err);
       res.status(500).json({ error: 'Redis error' });
     }
   });
@@ -401,6 +390,7 @@ app.listen(PORT, async () => {
     try {
       const [rows] = await mysqlPool.query('SELECT * FROM users');
       let successCount = 0;
+
       for (const user of rows) {
         try {
           const userData = {
@@ -410,15 +400,17 @@ app.listen(PORT, async () => {
             address: user.address || '',
             created_at: user.created_at.toISOString()
           };
+
           await redisClusterCommandWrapper(c => c.hSet(`user:${user.id}`, userData));
           successCount++;
-        } catch (e) {
-          console.error(`Error copying MySQL user ${user.id} to Redis:`, e);
+        } catch (err) {
+          console.error(`Error copying MySQL user ${user.id} to Redis:`, err);
         }
       }
+
       res.json({ message: `Copied ${successCount} users from MySQL to Redis`, total: rows.length, success: successCount });
-    } catch (e) {
-      console.error('MySQL to Redis copy error:', e);
+    } catch (err) {
+      console.error('MySQL to Redis copy error:', err);
       res.status(500).json({ error: 'Operation failed' });
     }
   });
@@ -430,6 +422,7 @@ app.listen(PORT, async () => {
       const keys = await getAllKeysFromCluster('user:*');
       let copiedCount = 0;
       let errorCount = 0;
+
       for (const key of keys) {
         try {
           const userData = await redisClusterCommandWrapper(c => c.hGetAll(key));
@@ -440,19 +433,20 @@ app.listen(PORT, async () => {
             );
             copiedCount++;
           }
-        } catch (e) {
-          console.error(`Error copying Redis user ${key} to MySQL:`, e);
+        } catch (err) {
+          console.error(`Error copying Redis user ${key} to MySQL:`, err);
           errorCount++;
         }
       }
+
       res.json({ message: `Copied ${copiedCount} users from Redis to MySQL`, total: keys.length, success: copiedCount, errors: errorCount });
-    } catch (e) {
-      console.error('Redis to MySQL copy error:', e);
+    } catch (err) {
+      console.error('Redis to MySQL copy error:', err);
       res.status(500).json({ error: 'Operation failed' });
     }
   });
 
-  // Cleanup duplicate users in Redis
+  // Cleanup duplicates in Redis
   app.post('/api/redis/cleanup-duplicates', async (req, res) => {
     if (!redisConnected) return res.status(503).json({ error: 'Redis not connected' });
     try {
@@ -473,8 +467,8 @@ app.listen(PORT, async () => {
               users.push(user);
             }
           }
-        } catch (e) {
-          console.error(`Error fetching Redis user for key ${key}:`, e);
+        } catch (err) {
+          console.error(`Error fetching Redis user for key ${key}:`, err);
         }
       }
 
@@ -483,8 +477,8 @@ app.listen(PORT, async () => {
         try {
           await redisClusterCommandWrapper(c => c.del(dup.key));
           cleanedCount++;
-        } catch (e) {
-          console.error(`Error deleting duplicate key ${dup.key}:`, e);
+        } catch (err) {
+          console.error(`Error deleting duplicate key ${dup.key}:`, err);
         }
       }
 
@@ -503,8 +497,8 @@ app.listen(PORT, async () => {
             }));
             await redisClusterCommandWrapper(c => c.del(user.key));
             reassignedCount++;
-          } catch (e) {
-            console.error(`Error reassigning ID for key ${user.key}:`, e);
+          } catch (err) {
+            console.error(`Error reassigning ID for key ${user.key}:`, err);
           }
         }
       }
@@ -515,8 +509,8 @@ app.listen(PORT, async () => {
         idsReassigned: reassignedCount,
         totalProcessed: keys.length
       });
-    } catch (e) {
-      console.error('Cleanup duplicates error:', e);
+    } catch (err) {
+      console.error('Cleanup duplicates error:', err);
       res.status(500).json({ error: 'Cleanup failed' });
     }
   });
@@ -540,8 +534,8 @@ process.on('SIGINT', async () => {
     console.log('MySQL pool closed');
 
     process.exit(0);
-  } catch (e) {
-    console.error('Error during shutdown:', e);
+  } catch (err) {
+    console.error('Error during shutdown:', err);
     process.exit(1);
   }
 });
