@@ -12,7 +12,7 @@ const PORT = process.env.PORT || 5000;
 
 // Middleware
 app.use(cors({
-  origin: true, // Allow any origin
+  origin: true,
   credentials: true
 }));
 app.use(express.json());
@@ -28,87 +28,66 @@ const mysqlPool = mysql.createPool({
   queueLimit: 0
 });
 
-// Parse Redis nodes from environment
-const redisNodes = (process.env.REDIS_NODES || 'redis-node-0:6379,redis-node-1:6379,redis-node-2:6379,redis-node-3:6379,redis-node-4:6379,redis-node-5:6379')
+// Parse Redis nodes from env
+const redisNodes = (process.env.REDIS_NODES || 
+  'redis-node-0:6379,redis-node-1:6379,redis-node-2:6379,redis-node-3:6379,redis-node-4:6379,redis-node-5:6379')
   .split(',')
   .map(node => {
     const [host, port] = node.split(':');
     return { host, port: parseInt(port, 10) };
   });
 
-// Redis password
 const redisPassword = process.env.REDIS_PASSWORD || 'bitnami123';
 
-// Standalone Redis clients, one per node (used to scan keys)
+// Standalone Redis clients (used for keys scanning)
 const redisStandaloneClients = [];
-
 let redisClusterClient = null;
 let redisConnected = false;
 
-// Helper function to wait in ms
+// Helper delay function
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
 
-// Robust Redis Cluster command wrapper with retries and slot cache validation
-async function redisClusterCommandWrapper(commandFn, maxRetries = 5, delayMs = 3000) {
+// Redis Cluster command wrapper to retry on transient cluster slot errors
+async function redisClusterCommandWrapper(commandFn, maxRetries = 5, delayMs = 2000) {
   if (!redisConnected || !redisClusterClient || !redisClusterClient.isOpen) {
     throw new Error('Redis cluster client is not connected');
   }
 
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
-      // Ensure slot cache is populated before command
-      if (!redisClusterClient.slots || redisClusterClient.slots.size === 0) {
-        console.warn('Redis cluster slot cache empty before command, refreshing...');
-        if (typeof redisClusterClient.refreshSlotsCache === 'function') {
-          await redisClusterClient.refreshSlotsCache();
-          console.log('Redis cluster slot cache refreshed.');
-          // Small wait after refresh
-          await wait(1000);
-        } else {
-          throw new Error('refreshSlotsCache function not available on redisClusterClient');
-        }
-      }
-
-      // Execute the passed command function and return result
       return await commandFn(redisClusterClient);
-
     } catch (err) {
-      // Detect the specific slot cache error that caused your original issue
-      if (err.message.includes('Cannot read properties of undefined (reading \'master\')') ||
-          err.message.includes('Slot is not served by any node')) {
-        console.warn(`Redis slot cache error on attempt ${attempt}: ${err.message}`);
-        // Refresh slot cache and retry
-        try {
-          await redisClusterClient.refreshSlotsCache();
-          await wait(delayMs);
-          continue; // retry loop
-        } catch (refreshErr) {
-          console.error('Error refreshing Redis slot cache:', refreshErr);
-          throw refreshErr;
-        }
-      } else {
-        // Unexpected error => rethrow
-        throw err;
+      if (
+        err.message.includes('Cannot read properties of undefined (reading \'master\')') ||
+        err.message.includes('Slot is not served by any node') ||
+        err.message.includes('CLUSTERDOWN')
+      ) {
+        console.warn(`Redis cluster slot error on attempt ${attempt}: ${err.message}`);
+        // The cluster client auto-refreshes slot cache internally on commands,
+        // so just wait and retry.
+        await wait(delayMs);
+        continue;
       }
+      throw err;
     }
   }
   throw new Error('Max Redis cluster retries exceeded');
 }
 
-// Initialize Redis: connect standalone nodes and cluster client, with retries and slot cache validation
+// Initialize Redis clients (standalone and cluster) with retries
 const initRedis = async () => {
   if (redisConnected) return;
 
   try {
-    // Connect standalone clients if none yet
+    // Connect standalone clients if not connected
     if (redisStandaloneClients.length === 0) {
       for (const node of redisNodes) {
         const client = redis.createClient({
           url: `redis://:${redisPassword}@${node.host}:${node.port}`
         });
-        client.on('error', err => console.error(`Redis node ${node.host}:${node.port} error:`, err));
+        client.on('error', err => console.error(`Standalone Redis node ${node.host}:${node.port} error:`, err));
         await client.connect();
-        console.log(`Connected to Redis node ${node.host}:${node.port}`);
+        console.log(`Connected to Redis standalone node ${node.host}:${node.port}`);
         client.nodeInfo = node;
         redisStandaloneClients.push(client);
       }
@@ -125,69 +104,50 @@ const initRedis = async () => {
           rootNodes: redisNodes.map(node => ({
             url: `redis://:${redisPassword}@${node.host}:${node.port}`
           })),
-          defaults: { password: redisPassword }
+          defaults: {
+            password: redisPassword
+          }
         });
 
         redisClusterClient.on('error', err => {
-          console.error('❌ Redis Cluster Error:', err);
+          console.error('Redis Cluster Error:', err);
           redisConnected = false;
         });
 
         await redisClusterClient.connect();
 
-        try {
-          const nodesInfo = await redisClusterClient.clusterNodes();
-          console.log('Cluster nodes info:', nodesInfo);
-        } catch (err) {
-          console.warn('Failed to get cluster nodes info:', err.message);
-        }
+        console.log('Connected to Redis Cluster');
 
-        if (typeof redisClusterClient.refreshSlotsCache === 'function') {
-          await redisClusterClient.refreshSlotsCache();
-          console.log('✅ Redis slot cache refreshed.');
-        } else {
-          console.warn('refreshSlotsCache method not found on redisClusterClient');
-        }
+        // No manual refreshSlotsCache or clusterNodes call here
 
-        if (!redisClusterClient.slots || redisClusterClient.slots.size === 0) {
-          throw new Error('Slots cache empty after refresh');
-        } else {
-          console.log('Slots cache contains entries:', redisClusterClient.slots.size);
-        }
-
-        try {
-          await redisClusterClient.get('dummy_key');
-        } catch (err) {
-          console.warn('Initial dummy GET failed (likely key does not exist, okay):', err.message);
-        }
-
-        await wait(6000);
+        // Wait shortly to allow cluster client to stabilize
+        await wait(3000);
 
         redisConnected = true;
-        console.log('✅ Connected to Redis Cluster and ready!');
+        console.log('✅ Redis cluster ready');
         break;
+
       } catch (err) {
-        console.error(`⚠️ Retry Redis Cluster Connect (${retries} retries left):`, err.message);
+        console.error(`Retrying Redis cluster connect (${retries} left):`, err.message);
         retries--;
         if (redisClusterClient) {
-          try { await redisClusterClient.quit(); } catch {}
+          try { await redisClusterClient.quit(); } catch {} 
           redisClusterClient = null;
         }
-        await wait(6000);
+        await wait(4000);
       }
     }
 
     if (!redisConnected) {
-      console.error('❌ Could not initialize Redis Cluster after retries.');
-      throw new Error('Redis cluster connection failed');
+      throw new Error('Failed to initialize Redis cluster after retries');
     }
   } catch (err) {
-    console.error('❌ Redis connection initialization error:', err);
+    console.error('Redis initialization error:', err);
     throw err;
   }
 };
 
-// Scan keys with standalone clients
+// Helper to get all keys matching a pattern from standalone clients
 async function getAllKeysFromCluster(pattern) {
   if (!redisConnected || redisStandaloneClients.length === 0) return [];
   const allKeys = [];
@@ -210,11 +170,11 @@ app.listen(PORT, async () => {
 
   try {
     await initRedis();
-  } catch(e) {
-    console.error('Failed to initialize Redis on startup:', e);
+  } catch (e) {
+    console.error('Redis initialization failed on startup:', e);
   }
 
-  // MySQL connection with retries
+  // MySQL connection retry logic
   let mysqlConnected = false;
   let retries = 10;
   while (!mysqlConnected && retries > 0) {
@@ -224,15 +184,14 @@ app.listen(PORT, async () => {
       conn.release();
       mysqlConnected = true;
     } catch (err) {
-      console.error(`Error connecting to MySQL (${retries} retries left):`, err);
+      console.error(`MySQL connection error (${retries} retries left):`, err);
       retries--;
       await wait(5000);
     }
   }
 
-  // ----- API Endpoints -----
+  // --- API ENDPOINTS ---
 
-  // Health Check
   app.get('/api/health', (req, res) => {
     const redisNodesStatus = redisStandaloneClients.map(client => ({
       host: client.nodeInfo.host,
@@ -247,14 +206,14 @@ app.listen(PORT, async () => {
     });
   });
 
-  // -------- MySQL CRUD APIs ---------
+  // MySQL CRUD
 
   app.get('/api/mysql/users', async (req, res) => {
     try {
       const [rows] = await mysqlPool.query('SELECT * FROM users');
       res.json(rows);
     } catch (err) {
-      console.error('Error fetching users from MySQL:', err);
+      console.error('MySQL users fetch error:', err);
       res.status(500).json({ error: 'Database error' });
     }
   });
@@ -265,7 +224,7 @@ app.listen(PORT, async () => {
       if (rows.length === 0) return res.status(404).json({ error: 'User not found' });
       res.json(rows[0]);
     } catch (err) {
-      console.error('Error fetching user from MySQL:', err);
+      console.error('MySQL user fetch error:', err);
       res.status(500).json({ error: 'Database error' });
     }
   });
@@ -280,7 +239,7 @@ app.listen(PORT, async () => {
       );
       res.status(201).json({ id: result.insertId, name, email, phone, address });
     } catch (err) {
-      console.error('Error creating user in MySQL:', err);
+      console.error('MySQL user create error:', err);
       if (err.code === 'ER_DUP_ENTRY') return res.status(409).json({ error: 'Email already exists' });
       res.status(500).json({ error: 'Database error' });
     }
@@ -298,7 +257,7 @@ app.listen(PORT, async () => {
       if (result.affectedRows === 0) return res.status(404).json({ error: 'User not found' });
       res.json({ id: userId, name, email, phone, address });
     } catch (err) {
-      console.error('Error updating user in MySQL:', err);
+      console.error('MySQL user update error:', err);
       if (err.code === 'ER_DUP_ENTRY') return res.status(409).json({ error: 'Email already exists' });
       res.status(500).json({ error: 'Database error' });
     }
@@ -310,15 +269,15 @@ app.listen(PORT, async () => {
       if (result.affectedRows === 0) return res.status(404).json({ error: 'User not found' });
       res.json({ message: 'User deleted successfully' });
     } catch (err) {
-      console.error('Error deleting user from MySQL:', err);
+      console.error('MySQL user delete error:', err);
       res.status(500).json({ error: 'Database error' });
     }
   });
 
-  // -------- Redis CRUD APIs ---------
+  // Redis CRUD
 
   app.get('/api/redis/users', async (req, res) => {
-    if (!redisConnected) return res.status(503).json({ error: 'Redis connection not available' });
+    if (!redisConnected) return res.status(503).json({ error: 'Redis not connected' });
     try {
       const keys = await getAllKeysFromCluster('user:*');
       if (keys.length === 0) return res.json([]);
@@ -326,49 +285,48 @@ app.listen(PORT, async () => {
       const users = [];
       for (const key of keys) {
         try {
-          const userData = await redisClusterCommandWrapper(client => client.hGetAll(key));
+          const userData = await redisClusterCommandWrapper(c => c.hGetAll(key));
           if (Object.keys(userData).length > 0) {
             users.push({ id: key.split(':')[1], ...userData });
           }
         } catch (err) {
-          console.error(`Error fetching data for key ${key}:`, err);
+          console.error(`Error fetching Redis data for key ${key}:`, err);
         }
       }
       res.json(users);
+
     } catch (err) {
-      console.error('Error fetching users from Redis:', err);
+      console.error('Redis fetch users error:', err);
       res.status(500).json({ error: 'Redis error' });
     }
   });
 
   app.get('/api/redis/users/:id', async (req, res) => {
-    if (!redisConnected) return res.status(503).json({ error: 'Redis connection not available' });
+    if (!redisConnected) return res.status(503).json({ error: 'Redis not connected' });
     try {
-      const userData = await redisClusterCommandWrapper(client => client.hGetAll(`user:${req.params.id}`));
+      const userData = await redisClusterCommandWrapper(c => c.hGetAll(`user:${req.params.id}`));
       if (Object.keys(userData).length === 0) return res.status(404).json({ error: 'User not found' });
       res.json({ id: req.params.id, ...userData });
     } catch (err) {
-      console.error('Error fetching user from Redis:', err);
+      console.error('Redis fetch user error:', err);
       res.status(500).json({ error: 'Redis error' });
     }
   });
 
   app.post('/api/redis/users', async (req, res) => {
-    if (!redisConnected) return res.status(503).json({ error: 'Redis connection not available' });
+    if (!redisConnected) return res.status(503).json({ error: 'Redis not connected' });
     const { name, email, phone, address } = req.body;
-    if (!name || !email) return res.status(400).json({ error: 'Name and email are required' });
+    if (!name || !email) return res.status(400).json({ error: 'Name and email required' });
 
     try {
-      // Check if email exists already
+      // Check for existing email
       const keys = await getAllKeysFromCluster('user:*');
       for (const key of keys) {
         try {
-          const userData = await redisClusterCommandWrapper(client => client.hGetAll(key));
-          if (userData.email === email) {
-            return res.status(409).json({ error: 'Email already exists' });
-          }
+          const userData = await redisClusterCommandWrapper(c => c.hGetAll(key));
+          if (userData.email === email) return res.status(409).json({ error: 'Email already exists' });
         } catch (err) {
-          console.error(`Error checking email for key ${key}:`, err);
+          console.error(`Error checking Redis email for key ${key}:`, err);
         }
       }
 
@@ -381,32 +339,30 @@ app.listen(PORT, async () => {
         created_at: new Date().toISOString()
       };
 
-      await redisClusterCommandWrapper(client => client.hSet(`user:${id}`, userData));
+      await redisClusterCommandWrapper(c => c.hSet(`user:${id}`, userData));
       res.status(201).json({ id, ...userData });
     } catch (err) {
-      console.error('Error creating user in Redis:', err);
+      console.error('Redis create user error:', err);
       res.status(500).json({ error: 'Redis error' });
     }
   });
 
   app.put('/api/redis/users/:id', async (req, res) => {
-    if (!redisConnected) return res.status(503).json({ error: 'Redis connection not available' });
+    if (!redisConnected) return res.status(503).json({ error: 'Redis not connected' });
     const { name, email, phone, address } = req.body;
     const userId = req.params.id;
-    if (!name || !email) return res.status(400).json({ error: 'Name and email are required' });
+    if (!name || !email) return res.status(400).json({ error: 'Name and email required' });
 
     try {
-      const exists = await redisClusterCommandWrapper(client => client.exists(`user:${userId}`));
+      const exists = await redisClusterCommandWrapper(c => c.exists(`user:${userId}`));
       if (!exists) return res.status(404).json({ error: 'User not found' });
 
       const keys = await getAllKeysFromCluster('user:*');
       for (const key of keys) {
         if (key !== `user:${userId}`) {
           try {
-            const userData = await redisClusterCommandWrapper(client => client.hGetAll(key));
-            if (userData.email === email) {
-              return res.status(409).json({ error: 'Email already exists' });
-            }
+            const userData = await redisClusterCommandWrapper(c => c.hGetAll(key));
+            if (userData.email === email) return res.status(409).json({ error: 'Email already exists' });
           } catch (err) {
             console.error(`Error checking email for key ${key}:`, err);
           }
@@ -414,30 +370,31 @@ app.listen(PORT, async () => {
       }
 
       const userData = { name, email, phone: phone || '', address: address || '' };
-      await redisClusterCommandWrapper(client => client.hSet(`user:${userId}`, userData));
+      await redisClusterCommandWrapper(c => c.hSet(`user:${userId}`, userData));
       res.json({ id: userId, ...userData });
+
     } catch (err) {
-      console.error('Error updating user in Redis:', err);
+      console.error('Redis update user error:', err);
       res.status(500).json({ error: 'Redis error' });
     }
   });
 
   app.delete('/api/redis/users/:id', async (req, res) => {
-    if (!redisConnected) return res.status(503).json({ error: 'Redis connection not available' });
+    if (!redisConnected) return res.status(503).json({ error: 'Redis not connected' });
     try {
-      const exists = await redisClusterCommandWrapper(client => client.exists(`user:${req.params.id}`));
+      const exists = await redisClusterCommandWrapper(c => c.exists(`user:${req.params.id}`));
       if (!exists) return res.status(404).json({ error: 'User not found' });
-      await redisClusterCommandWrapper(client => client.del(`user:${req.params.id}`));
+      await redisClusterCommandWrapper(c => c.del(`user:${req.params.id}`));
       res.json({ message: 'User deleted successfully' });
     } catch (err) {
-      console.error('Error deleting user from Redis:', err);
+      console.error('Redis delete user error:', err);
       res.status(500).json({ error: 'Redis error' });
     }
   });
 
   // Copy MySQL -> Redis
   app.post('/api/mysql-to-redis', async (req, res) => {
-    if (!redisConnected) return res.status(503).json({ error: 'Redis connection not available' });
+    if (!redisConnected) return res.status(503).json({ error: 'Redis not connected' });
     try {
       const [rows] = await mysqlPool.query('SELECT * FROM users');
       let successCount = 0;
@@ -450,29 +407,29 @@ app.listen(PORT, async () => {
             address: user.address || '',
             created_at: user.created_at.toISOString()
           };
-          await redisClusterCommandWrapper(client => client.hSet(`user:${user.id}`, userData));
+          await redisClusterCommandWrapper(c => c.hSet(`user:${user.id}`, userData));
           successCount++;
         } catch (err) {
-          console.error(`Error copying user ${user.id} to Redis:`, err);
+          console.error(`Error copying MySQL user ${user.id} to Redis:`, err);
         }
       }
       res.json({ message: `Copied ${successCount} users from MySQL to Redis`, total: rows.length, success: successCount });
     } catch (err) {
-      console.error('Error copying users from MySQL to Redis:', err);
-      res.status(500).json({ error: 'Operation failed' });
+      console.error('MySQL to Redis copy error:', err);
+      res.status(500).json({ error: 'Copy operation failed' });
     }
   });
 
   // Copy Redis -> MySQL
   app.post('/api/redis-to-mysql', async (req, res) => {
-    if (!redisConnected) return res.status(503).json({ error: 'Redis connection not available' });
+    if (!redisConnected) return res.status(503).json({ error: 'Redis not connected' });
     try {
       const keys = await getAllKeysFromCluster('user:*');
       let copiedCount = 0;
       let errorCount = 0;
       for (const key of keys) {
         try {
-          const userData = await redisClusterCommandWrapper(client => client.hGetAll(key));
+          const userData = await redisClusterCommandWrapper(c => c.hGetAll(key));
           if (Object.keys(userData).length > 0) {
             await mysqlPool.query(
               'INSERT INTO users (name, email, phone, address) VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE name=?, phone=?, address=?',
@@ -481,20 +438,20 @@ app.listen(PORT, async () => {
             copiedCount++;
           }
         } catch (err) {
-          console.error(`Error inserting user ${key} to MySQL:`, err);
+          console.error(`Error copying Redis user ${key} to MySQL:`, err);
           errorCount++;
         }
       }
       res.json({ message: `Copied ${copiedCount} users from Redis to MySQL`, total: keys.length, success: copiedCount, errors: errorCount });
     } catch (err) {
-      console.error('Error copying users from Redis to MySQL:', err);
-      res.status(500).json({ error: 'Operation failed' });
+      console.error('Redis to MySQL copy error:', err);
+      res.status(500).json({ error: 'Copy operation failed' });
     }
   });
 
-  // Cleanup duplicates
+  // Cleanup duplicates in Redis
   app.post('/api/redis/cleanup-duplicates', async (req, res) => {
-    if (!redisConnected) return res.status(503).json({ error: 'Redis connection not available' });
+    if (!redisConnected) return res.status(503).json({ error: 'Redis not connected' });
     try {
       const keys = await getAllKeysFromCluster('user:*');
       const users = [];
@@ -503,7 +460,7 @@ app.listen(PORT, async () => {
 
       for (const key of keys) {
         try {
-          const userData = await redisClusterCommandWrapper(client => client.hGetAll(key));
+          const userData = await redisClusterCommandWrapper(c => c.hGetAll(key));
           if (Object.keys(userData).length > 0) {
             const user = { key, id: key.split(':')[1], ...userData };
             if (seenEmails.has(userData.email)) {
@@ -514,17 +471,17 @@ app.listen(PORT, async () => {
             }
           }
         } catch (err) {
-          console.error(`Error fetching data for key ${key}:`, err);
+          console.error(`Error fetching Redis user for key ${key}:`, err);
         }
       }
 
       let cleanedCount = 0;
-      for (const duplicate of duplicates) {
+      for (const dup of duplicates) {
         try {
-          await redisClusterCommandWrapper(client => client.del(duplicate.key));
+          await redisClusterCommandWrapper(c => c.del(dup.key));
           cleanedCount++;
         } catch (err) {
-          console.error(`Error deleting duplicate ${duplicate.key}:`, err);
+          console.error(`Error deleting duplicate key ${dup.key}:`, err);
         }
       }
 
@@ -534,17 +491,17 @@ app.listen(PORT, async () => {
           try {
             const newId = randomUUID();
             const newKey = `user:${newId}`;
-            await redisClusterCommandWrapper(client => client.hSet(newKey, {
+            await redisClusterCommandWrapper(c => c.hSet(newKey, {
               name: user.name,
               email: user.email,
               phone: user.phone || '',
               address: user.address || '',
               created_at: user.created_at || new Date().toISOString()
             }));
-            await redisClusterCommandWrapper(client => client.del(user.key));
+            await redisClusterCommandWrapper(c => c.del(user.key));
             reassignedCount++;
           } catch (err) {
-            console.error(`Error reassigning ID for ${user.key}:`, err);
+            console.error(`Error reassigning ID for key ${user.key}:`, err);
           }
         }
       }
@@ -556,11 +513,10 @@ app.listen(PORT, async () => {
         totalProcessed: keys.length
       });
     } catch (err) {
-      console.error('Error during cleanup:', err);
+      console.error('Cleanup duplicates error:', err);
       res.status(500).json({ error: 'Cleanup failed' });
     }
   });
-
 });
 
 // Graceful shutdown
