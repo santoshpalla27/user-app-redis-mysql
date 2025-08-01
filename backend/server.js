@@ -50,46 +50,31 @@ let redisConnected = false;
 // Initialize Redis connections
 const initRedis = async () => {
   if (redisConnected) return;
-
   try {
-    // Create standalone clients for each node
     for (const node of redisNodes) {
       const client = redis.createClient({
         url: `redis://:${redisPassword}@${node.host}:${node.port}`
       });
-
-      client.on('error', (err) => {
-        console.error(`Redis node ${node.host}:${node.port} error:`, err);
-      });
-
+      client.on('error', err => console.error(`Redis node ${node.host}:${node.port} error:`, err));
       await client.connect();
       console.log(`Connected to Redis node ${node.host}:${node.port}`);
-
       client.nodeInfo = node;
       redisStandaloneClients.push(client);
     }
 
-    // Retry logic for Redis Cluster connection
     let retries = 10;
     const delay = 2000;
 
     while (retries > 0) {
       try {
         redisClusterClient = redis.createCluster({
-          rootNodes: redisNodes.map(node => ({
-            url: `redis://${node.host}:${node.port}`
-          })),
-          defaults: {
-            password: redisPassword
-          }
+          rootNodes: redisNodes.map(node => ({ url: `redis://${node.host}:${node.port}` })),
+          defaults: { password: redisPassword }
         });
-
-        redisClusterClient.on('error', err => {
-          console.error('❌ Redis Cluster Error:', err);
-        });
-
+        redisClusterClient.on('error', err => console.error('❌ Redis Cluster Error:', err));
         await redisClusterClient.connect();
         console.log('✅ Connected to Redis Cluster!');
+        await new Promise(res => setTimeout(res, 2000)); // ensure slot map
         redisConnected = true;
         break;
       } catch (err) {
@@ -99,69 +84,62 @@ const initRedis = async () => {
       }
     }
 
-    if (!redisConnected) {
-      console.error('❌ Could not connect to Redis Cluster after multiple attempts.');
-    }
-
+    if (!redisConnected) console.error('❌ Could not connect to Redis Cluster after multiple attempts.');
   } catch (err) {
     console.error('Redis connection error:', err);
   }
 };
 
+async function getAllKeysFromCluster(pattern) {
+  if (!redisConnected || redisStandaloneClients.length === 0) return [];
+  const allKeys = [];
+  try {
+    for (const client of redisStandaloneClients) {
+      if (client.isOpen) {
+        const nodeKeys = await client.keys(pattern);
+        allKeys.push(...nodeKeys);
+      }
+    }
+    return allKeys;
+  } catch (err) {
+    console.error('Error scanning Redis keys:', err);
+    return [];
+  }
+}
 
-// Test database connections on startup
+
 app.listen(PORT, async () => {
   console.log(`Server running on port ${PORT}`);
-  
-  // Connect to Redis
   await initRedis();
-  
-  // Then connect to MySQL with retries
+
   let mysqlConnected = false;
   let retries = 10;
-  
   while (!mysqlConnected && retries > 0) {
     try {
-      const connection = await mysqlPool.getConnection();
+      const conn = await mysqlPool.getConnection();
       console.log('Connected to MySQL database!');
-      connection.release();
+      conn.release();
       mysqlConnected = true;
-      
-      // Add routes after successful connection
-      setupRoutes();
     } catch (err) {
       console.error(`Error connecting to MySQL (${retries} retries left):`, err);
-      retries -= 1;
-      // Wait 5 seconds before retrying
-      await new Promise(resolve => setTimeout(resolve, 5000));
+      retries--;
+      await new Promise(res => setTimeout(res, 5000));
     }
   }
-  
-  if (!mysqlConnected) {
-    console.error('Failed to connect to MySQL after multiple attempts');
-    // Still set up routes so Redis operations can work
-    setupRoutes();
-  }
-});
 
-// Define all routes
-function setupRoutes() {
-  // Health check route
   app.get('/api/health', (req, res) => {
     const redisNodesStatus = redisStandaloneClients.map(client => ({
       host: client.nodeInfo.host,
       port: client.nodeInfo.port,
       status: client.isOpen ? 'connected' : 'disconnected'
     }));
-    
-    res.json({ 
-      status: 'healthy', 
-      mysql: 'connected', 
-      redis_cluster: redisClusterClient && redisClusterClient.isOpen ? 'connected' : 'disconnected',
+    res.json({
+      status: 'healthy',
+      mysql: mysqlConnected ? 'connected' : 'disconnected',
+      redis_cluster: redisClusterClient?.isOpen ? 'connected' : 'disconnected',
       redis_nodes: redisNodesStatus
     });
   });
-
   // Get all users from MySQL
   app.get('/api/mysql/users', async (req, res) => {
     try {
@@ -268,32 +246,7 @@ function setupRoutes() {
     }
   });
 
-  // Redis Routes
   
-  // Helper function to scan keys across all Redis nodes
-  async function getAllKeysFromCluster(pattern) {
-    if (!redisConnected || redisStandaloneClients.length === 0) {
-      return [];
-    }
-    
-    const allKeys = [];
-    
-    try {
-      // Get keys from each node
-      for (const client of redisStandaloneClients) {
-        if (client.isOpen) {
-          const nodeKeys = await client.keys(pattern);
-          allKeys.push(...nodeKeys);
-        }
-      }
-      
-      return allKeys;
-    } catch (err) {
-      console.error('Error scanning Redis keys:', err);
-      return [];
-    }
-  }
-
   // Get all users from Redis
   app.get('/api/redis/users', async (req, res) => {
     if (!redisConnected) {
@@ -654,7 +607,11 @@ function setupRoutes() {
       res.status(500).json({ error: 'Cleanup failed' });
     }
   });
-}
+
+});
+
+
+
 
 
 // Graceful shutdown
