@@ -1,5 +1,5 @@
 module "vpc" {
-  source = "terraform-aws-modules/vpc/aws"
+  source  = "terraform-aws-modules/vpc/aws"
   version = "~> 5.0"
 
   name = var.vpc_name
@@ -20,7 +20,7 @@ module "vpc" {
 
   # Additional tags
   tags = {
-    Terraform   = "true"
+    Terraform = "true"
   }
 
   # Tags for public subnets
@@ -47,8 +47,8 @@ resource "aws_key_pair" "generated" {
 
 # Save the private key locally as .pem
 resource "local_file" "pem" {
-  filename = "${path.module}/terraform-key.pem"
-  content  = tls_private_key.key.private_key_pem
+  filename        = "${path.module}/terraform-key.pem"
+  content         = tls_private_key.key.private_key_pem
   file_permission = "0400" # Make it read-only
 }
 
@@ -158,18 +158,18 @@ resource "aws_autoscaling_group" "frontend" {
   name                      = "frontend-asg"
   min_size                  = 1
   max_size                  = 6
-  desired_capacity          = 4
-  vpc_zone_identifier       = module.vpc.private_subnets
+  desired_capacity          = 1
+  vpc_zone_identifier       = module.vpc.public_subnets
   health_check_type         = "ELB"
   health_check_grace_period = 300
   force_delete              = true
-  target_group_arns         = [ aws_lb_target_group.frontend_tg.arn ]
+  target_group_arns         = [aws_lb_target_group.frontend_tg.arn]
 
   mixed_instances_policy {
     launch_template {
       launch_template_specification {
         launch_template_id = aws_launch_template.main-template.id
-        version             = "$Latest"
+        version            = "$Latest"
       }
 
       # # Optional: override instance types (different from launch_template's default)
@@ -187,9 +187,9 @@ resource "aws_autoscaling_group" "frontend" {
     }
 
     instances_distribution {
-      on_demand_base_capacity                  = 1   # Start with 1 On-Demand
-      on_demand_percentage_above_base_capacity = 20   # 20% of instances will be On-Demand
-      spot_allocation_strategy                 = "capacity-optimized"  # or "lowest-price"
+      on_demand_base_capacity                  = 1                    # Start with 1 On-Demand
+      on_demand_percentage_above_base_capacity = 20                   # 20% of instances will be On-Demand
+      spot_allocation_strategy                 = "capacity-optimized" # or "lowest-price"
     }
   }
 
@@ -404,18 +404,18 @@ resource "aws_autoscaling_group" "backend" {
   name                      = "backend-asg"
   min_size                  = 1
   max_size                  = 6
-  desired_capacity          = 4
-  vpc_zone_identifier       = module.vpc.private_subnets
+  desired_capacity          = 1
+  vpc_zone_identifier       = module.vpc.public_subnets
   health_check_type         = "ELB"
   health_check_grace_period = 300
   force_delete              = true
-  target_group_arns         = [ aws_lb_target_group.backend_tg.arn ]
+  target_group_arns         = [aws_lb_target_group.backend_tg.arn]
 
   mixed_instances_policy {
     launch_template {
       launch_template_specification {
         launch_template_id = aws_launch_template.backend-template.id
-        version             = "$Latest"
+        version            = "$Latest"
       }
 
       # # Optional: override instance types (different from launch_template's default)
@@ -433,9 +433,9 @@ resource "aws_autoscaling_group" "backend" {
     }
 
     instances_distribution {
-      on_demand_base_capacity                  = 1   # Start with 1 On-Demand
-      on_demand_percentage_above_base_capacity = 20   # 20% of instances will be On-Demand
-      spot_allocation_strategy                 = "capacity-optimized"  # or "lowest-price"
+      on_demand_base_capacity                  = 1                    # Start with 1 On-Demand
+      on_demand_percentage_above_base_capacity = 20                   # 20% of instances will be On-Demand
+      spot_allocation_strategy                 = "capacity-optimized" # or "lowest-price"
     }
   }
 
@@ -528,7 +528,7 @@ resource "aws_iam_role" "redis_ec2_role" {
         }
       }
     ]
-  })x
+  })
 }
 
 # Attach the EC2 Full Access policy to the IAM role
@@ -546,20 +546,26 @@ resource "aws_iam_instance_profile" "redis_ec2_profile" {
 
 # Launch EC2 instances
 resource "aws_instance" "redis" {
-  count               = var.instance_count
-  ami                 = var.ami_id
-  instance_type       = var.instance_type
-  key_name            = aws_key_pair.generated.key_name
-  security_groups     = [aws_security_group.redis_sg.name]
-  iam_instance_profile = aws_iam_instance_profile.redis_ec2_profile.name
+  count                  = var.instance_count
+  ami                    = var.ami_id
+  instance_type          = var.instance_type
+  subnet_id              = element(module.vpc.public_subnets, count.index % length(module.vpc.public_subnets))
+  key_name               = aws_key_pair.generated.key_name
+  associate_public_ip_address = true
+  vpc_security_group_ids = [aws_security_group.redis_sg.id]
+  iam_instance_profile   = aws_iam_instance_profile.redis_ec2_profile.name
 
   user_data = <<-EOF
                 #!/bin/bash
+                exec > >(tee /var/log/user-data.log|logger -t user-data -s 2>/dev/console) 2>&1
+                set -xe
+                echo "User data script started at $(date)"
                 # Install Docker
                 sudo yum install -y docker
                 sudo systemctl start docker
                 sudo systemctl enable docker
                 sudo usermod -aG docker ec2-user
+                sudo yum install -y awscli
 
                 # Tune system parameters
                 echo 'net.core.rmem_max = 134217728' | sudo tee -a /etc/sysctl.conf
@@ -598,8 +604,12 @@ resource "aws_instance" "redis" {
 
                 if [ ${count.index} -eq 3 ]; then
                     # Fetch all instance IPs from the metadata
-                    INSTANCE_IPS=$(aws ec2 describe-instances --region "${var.aws_region}" \
-                        --query "Reservations[*].Instances[*].PrivateIpAddress" --output text)
+                    INSTANCE_IPS=$(aws ec2 describe-instances \
+                        --region "${var.aws_region}" \
+                        --filters "Name=tag:Name,Values=redis-*" "Name=instance-state-name,Values=running" \
+                        --query "Reservations[*].Instances[*].PrivateIpAddress" \
+                        --output text)
+
                     
                     IP_PORTS=$(echo "$INSTANCE_IPS" | sed -E 's/([^ ]+)/\1:6379 \1:6380 \1:6381/g')
                     echo "IP_PORTS: $IP_PORTS" >> /home/ec2-user/redis_setup.log

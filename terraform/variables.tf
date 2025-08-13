@@ -22,13 +22,6 @@ variable "instance_type" {
   default     = "c7i-flex.large" # Example instance type
 }
 
-
-
-variable "aws_region" {
-  description = "The AWS region to create resources in"
-  default     = "us-east-1"
-}
-
 variable "instance_count" {
   description = "Number of EC2 instances to create"
   default     = 4

@@ -33,6 +33,12 @@ resource "aws_security_group" "ec2_sg" {
     security_groups = [aws_security_group.alb_sg.id]
   }
   ingress {
+    from_port   = 22
+    to_port     = 22
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+  ingress {
     from_port       = 443
     to_port         = 443
     protocol        = "tcp"
@@ -51,7 +57,7 @@ resource "aws_security_group" "ec2_sg" {
 
 resource "aws_security_group" "redis_sg" {
   name        = "redis-sg"
-  vpc_id = module.vpc.vpc_id
+  vpc_id      = module.vpc.vpc_id
   description = "Allow inbound traffic for Redis"
 
   ingress {
@@ -61,7 +67,7 @@ resource "aws_security_group" "redis_sg" {
     cidr_blocks = ["0.0.0.0/0"]
   }
   ingress {
-    from_port   = 22 
+    from_port   = 22
     to_port     = 22
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]

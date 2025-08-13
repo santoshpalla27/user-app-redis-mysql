@@ -23,7 +23,7 @@ resource "aws_acm_certificate" "multi_domain_cert" {
 # Create Route53 DNS validation records
 resource "aws_route53_record" "cert_validation" {
   for_each = {
-    for dvo in aws_acm_certificate.multi_domain_cert.domain_validation_options : 
+    for dvo in aws_acm_certificate.multi_domain_cert.domain_validation_options :
     dvo.domain_name => {
       name   = dvo.resource_record_name
       record = dvo.resource_record_value
