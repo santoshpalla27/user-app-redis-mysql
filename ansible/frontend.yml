@@ -1,0 +1,155 @@
+---
+- name: Install Docker, Clone Repo, and Deploy Frontend Container
+  hosts: localhost
+  connection: local
+  become: yes
+  vars:
+    repo_url: "https://github.com/santoshpalla27/user-app-redis-mysql.git"
+    repo_branch: "ec2-deployment"
+    repo_dir: "/opt/user-app-redis-mysql"
+    container_name: "frontend"
+    container_port: 3000
+    image_name: "frontend-app"
+    image_tag: "latest"
+
+  tasks:
+    - name: Verify running on Amazon Linux
+      fail:
+        msg: "This playbook is designed for Amazon Linux only. Current OS: {{ ansible_distribution }}"
+      when: ansible_distribution != "Amazon"
+
+    - name: Update system packages (Amazon Linux)
+      yum:
+        name: "*"
+        state: latest
+
+    - name: Install required packages (Amazon Linux)
+      yum:
+        name:
+          - git
+          - docker
+          - python3-pip
+        state: present
+
+    - name: Try installing Docker Python library via yum first
+      yum:
+        name: python3-docker
+        state: present
+      ignore_errors: yes
+      register: yum_docker_install
+
+    - name: Install Docker Python library via pip (fallback)
+      pip:
+        name: docker
+        executable: pip3
+        extra_args: --user --break-system-packages
+      become: no
+      when: yum_docker_install is failed
+
+    - name: Start and enable Docker service
+      systemd:
+        name: docker
+        state: started
+        enabled: yes
+
+    - name: Add current user to docker group
+      user:
+        name: "{{ ansible_user_id }}"
+        groups: docker
+        append: yes
+
+    - name: Reset connection to pick up new group membership
+      meta: reset_connection
+
+    - name: Remove existing repository directory if it exists
+      file:
+        path: "{{ repo_dir }}"
+        state: absent
+
+    - name: Clone the repository
+      git:
+        repo: "{{ repo_url }}"
+        dest: "{{ repo_dir }}"
+        version: "{{ repo_branch }}"
+        force: yes
+
+    - name: Check if Dockerfile exists in frontend directory
+      stat:
+        path: "{{ repo_dir }}/frontend/Dockerfile"
+      register: dockerfile_check
+
+    - name: Fail if Dockerfile doesn't exist
+      fail:
+        msg: "Dockerfile not found in {{ repo_dir }}/frontend/"
+      when: not dockerfile_check.stat.exists
+
+    - name: Stop existing frontend container if running
+      docker_container:
+        name: "{{ container_name }}"
+        state: absent
+      ignore_errors: yes
+
+    - name: Remove existing frontend image
+      docker_image:
+        name: "{{ image_name }}:{{ image_tag }}"
+        state: absent
+        force_absent: yes
+      ignore_errors: yes
+
+    - name: Build Docker image from frontend directory
+      docker_image:
+        build:
+          path: "{{ repo_dir }}/frontend"
+          dockerfile: Dockerfile
+        name: "{{ image_name }}"
+        tag: "{{ image_tag }}"
+        source: build
+        force_source: yes
+
+    - name: Run frontend container
+      docker_container:
+        name: "{{ container_name }}"
+        image: "{{ image_name }}:{{ image_tag }}"
+        state: started
+        restart_policy: unless-stopped
+        ports:
+          - "{{ container_port }}:{{ container_port }}"
+        env:
+          NODE_ENV: production
+        healthcheck:
+          test: ["CMD", "curl", "-f", "http://localhost:{{ container_port }}/"]
+          interval: 30s
+          timeout: 10s
+          retries: 3
+          start_period: 40s
+
+    - name: Wait for container to be healthy
+      wait_for:
+        host: localhost
+        port: "{{ container_port }}"
+        delay: 10
+        timeout: 60
+
+    - name: Verify container is running
+      docker_container_info:
+        name: "{{ container_name }}"
+      register: container_info
+
+    - name: Display container status
+      debug:
+        msg: |
+          Container Status: {{ container_info.container.State.Status }}
+          Container Health: {{ container_info.container.State.Health.Status | default('N/A') }}
+          Port Mapping: {{ container_info.container.NetworkSettings.Ports }}
+
+    - name: Clean up unused Docker images
+      docker_prune:
+        images: yes
+        images_filters:
+          dangling: false
+
+  handlers:
+    - name: restart docker
+      systemd:
+        name: docker
+        state: restarted
