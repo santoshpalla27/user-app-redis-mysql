@@ -21,6 +21,12 @@
         name: "*"
         state: latest
 
+    - name: Remove curl-minimal to avoid conflicts
+      yum:
+        name: curl-minimal
+        state: absent
+      ignore_errors: yes
+
     - name: Install required packages (Amazon Linux)
       yum:
         name:
