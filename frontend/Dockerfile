@@ -13,7 +13,7 @@ RUN npm install
 COPY . .
 
 # Set environment variable
-ENV REACT_APP_API_URL=http://backend.santosh.website
+ENV REACT_APP_API_URL=https://backend.santosh.website
 
 # Build the application
 RUN npm run build

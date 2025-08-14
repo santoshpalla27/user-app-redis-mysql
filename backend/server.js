@@ -10,16 +10,14 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-// -------------------- Middleware --------------------
+// Middleware
 app.use(cors({
-  origin: '*',
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization']
+  origin: true,
+  credentials: true
 }));
-app.options('*', cors()); // Handle preflight
 app.use(express.json());
 
-// -------------------- MySQL Connection Pool --------------------
+// MySQL Connection Pool
 const mysqlPool = mysql.createPool({
   host: process.env.MYSQL_HOST || 'mysql',
   user: process.env.MYSQL_USER || 'user',
@@ -30,7 +28,7 @@ const mysqlPool = mysql.createPool({
   queueLimit: 0
 });
 
-// -------------------- Redis Config --------------------
+// Parse Redis nodes from environment
 const redisNodes = (process.env.REDIS_NODES ||
   'redis-node-0:6379,redis-node-1:6379,redis-node-2:6379,redis-node-3:6379,redis-node-4:6379,redis-node-5:6379')
   .split(',')
@@ -39,50 +37,63 @@ const redisNodes = (process.env.REDIS_NODES ||
     return { host, port: parseInt(port, 10) };
   });
 
+// Redis password
 const redisPassword = process.env.REDIS_PASSWORD || 'bitnami123';
+
+// Standalone Redis clients (for keys scanning)
 const redisStandaloneClients = [];
+
 let redisClusterClient = null;
 let redisConnected = false;
 
-// -------------------- Utility Functions --------------------
+// Utility: delay helper
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
 
+// Dispose existing cluster client safely
 async function disposeClusterClient() {
   try {
     if (redisClusterClient && redisClusterClient.isOpen) {
       console.log('Closing existing Redis cluster client...');
       await redisClusterClient.quit();
+      redisClusterClient = null;
+      redisConnected = false;
     }
   } catch (err) {
     console.error('Error quitting Redis cluster client:', err);
-  } finally {
-    redisClusterClient = null;
-    redisConnected = false;
   }
 }
 
+// Create and connect Redis cluster client with delay for stability
 async function createClusterClient() {
   await disposeClusterClient();
+
   const client = redis.createCluster({
     rootNodes: redisNodes.map(node => ({
       url: `redis://:${redisPassword}@${node.host}:${node.port}`
     })),
-    defaults: { password: redisPassword }
+    defaults: {
+      password: redisPassword
+    }
   });
 
-  client.on('error', err => {
+  client.on('error', (err) => {
     console.error('Redis Cluster Error:', err);
     redisConnected = false;
   });
 
   await client.connect();
-  console.log('Connected to Redis Cluster, waiting 15s...');
+
+  console.log('Connected to Redis Cluster, waiting 15 seconds for cluster topology stabilization...');
   await wait(15000);
+
   redisConnected = true;
+  console.log('✅ Redis cluster ready');
+
   return client;
 }
 
-async function initRedis() {
+// Initialize standalone and cluster Redis clients
+const initRedis = async () => {
   if (redisStandaloneClients.length === 0) {
     for (const node of redisNodes) {
       const client = redis.createClient({
@@ -95,49 +106,89 @@ async function initRedis() {
       redisStandaloneClients.push(client);
     }
   }
-  redisClusterClient = await createClusterClient();
-}
 
+  redisClusterClient = await createClusterClient();
+};
+
+// Wrapper for Redis cluster commands with retries and reconnects on slot errors
 async function redisClusterCommandWrapper(commandFn, maxRetries = 5, delayMs = 3000) {
-  if (!redisConnected || !redisClusterClient?.isOpen) {
+  if (!redisConnected || !redisClusterClient || !redisClusterClient.isOpen) {
     throw new Error('Redis cluster client is not connected');
   }
+
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
+      console.log(`Redis cluster command attempt ${attempt}.`);
       return await commandFn(redisClusterClient);
     } catch (err) {
+      // Check for known cluster slot/connection errors
       if (
-        err.message.includes("reading 'master'") ||
+        err.message.includes("Cannot read properties of undefined (reading 'master')") ||
         err.message.includes('Slot is not served by any node') ||
         err.message.includes('CLUSTERDOWN')
       ) {
-        console.warn(`Redis slot error attempt ${attempt}: ${err.message}`);
-        await disposeClusterClient();
-        redisClusterClient = await createClusterClient();
-        await wait(delayMs);
-        continue;
+        console.warn(`Redis cluster slot error on attempt ${attempt}: ${err.message}`);
+        try {
+          console.log('Reconnecting Redis cluster client to refresh slot cache and state...');
+          await disposeClusterClient();
+          redisClusterClient = await createClusterClient();
+          await wait(delayMs);
+        } catch (reconnectErr) {
+          console.error('Error reconnecting Redis cluster client:', reconnectErr);
+          if (attempt === maxRetries) throw reconnectErr;
+          await wait(delayMs);
+        }
+        continue; // Retry after reconnect
       }
-      throw err;
+      throw err; // Unexpected errors
     }
   }
-  throw new Error('Max Redis retries exceeded');
+  throw new Error('Max Redis cluster retries exceeded');
 }
 
+// Helper: scan keys across all standalone clients
 async function getAllKeysFromCluster(pattern) {
   if (!redisConnected || redisStandaloneClients.length === 0) return [];
   const allKeys = [];
-  for (const client of redisStandaloneClients) {
-    if (client.isOpen) {
-      const keys = await client.keys(pattern);
-      allKeys.push(...keys);
+  try {
+    for (const client of redisStandaloneClients) {
+      if (client.isOpen) {
+        const keys = await client.keys(pattern);
+        allKeys.push(...keys);
+      }
     }
+    return allKeys;
+  } catch (err) {
+    console.error('Error scanning Redis keys:', err);
+    return [];
   }
-  return allKeys;
 }
 
-// -------------------- Routes --------------------
+app.listen(PORT, async () => {
+  console.log(`Server running on port ${PORT}`);
 
-// Health Check
+  try {
+    await initRedis();
+  } catch (err) {
+    console.error('Redis initialization failed:', err);
+  }
+
+  // MySQL connection retry logic
+  let mysqlConnected = false;
+  let retries = 10;
+  while (!mysqlConnected && retries > 0) {
+    try {
+      const conn = await mysqlPool.getConnection();
+      console.log('Connected to MySQL database!');
+      conn.release();
+      mysqlConnected = true;
+    } catch (err) {
+      console.error(`MySQL connection error (${retries} retries left):`, err);
+      retries--;
+      await wait(5000);
+    }
+  }
+
   // --- APIs ---
 
   app.get('/api/health', (req, res) => {
@@ -463,48 +514,25 @@ async function getAllKeysFromCluster(pattern) {
       res.status(500).json({ error: 'Cleanup failed' });
     }
   });
-
-// (Keep all other MySQL + Redis CRUD routes same as your original — unchanged)
-
-// -------------------- Start Server --------------------
-app.listen(PORT, () => {
-  console.log(`✅ Server running on port ${PORT}`);
-
-  // Initialize Redis & MySQL in background
-  (async () => {
-    try {
-      await initRedis();
-      console.log('Redis initialized');
-    } catch (err) {
-      console.error('Redis initialization failed:', err);
-    }
-
-    let retries = 10;
-    while (retries > 0) {
-      try {
-        const conn = await mysqlPool.getConnection();
-        console.log('Connected to MySQL database!');
-        conn.release();
-        break;
-      } catch (err) {
-        console.error(`MySQL connection error (${retries} retries left):`, err);
-        retries--;
-        await wait(5000);
-      }
-    }
-  })();
 });
 
-// -------------------- Graceful Shutdown --------------------
+// Graceful shutdown
 process.on('SIGINT', async () => {
   console.log('Shutting down server...');
   try {
     for (const client of redisStandaloneClients) {
       if (client.isOpen) await client.quit();
     }
-    if (redisClusterClient?.isOpen) await redisClusterClient.quit();
+    console.log('Standalone Redis clients disconnected');
+
+    if (redisClusterClient && redisClusterClient.isOpen) {
+      await redisClusterClient.quit();
+      console.log('Redis cluster client disconnected');
+    }
+
     await mysqlPool.end();
-    console.log('Cleanup complete');
+    console.log('MySQL pool closed');
+
     process.exit(0);
   } catch (err) {
     console.error('Error during shutdown:', err);
