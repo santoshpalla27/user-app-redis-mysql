@@ -60,13 +60,13 @@ resource "aws_launch_template" "main-template" {
 
 
   user_data = base64encode(<<-EOF
-              #!/bin/bash
-              apt update -y
-              apt install -y git ansible 
-              git clone -b ec2-deployment https://github.com/santoshpalla27/user-app-redis-mysql.git
-              cd user-app-redis-mysql/ansible        
-              ansible-playbook frontend.yml 
-              EOF
+#!/bin/bash
+set -xe
+yum install -y git ansible
+git clone -b ec2-deployment https://github.com/santoshpalla27/user-app-redis-mysql.git
+cd user-app-redis-mysql/ansible
+ansible-playbook frontend.yml
+EOF
   )
 
 
@@ -107,12 +107,12 @@ resource "aws_lb_target_group" "frontend_tg" {
 
   health_check {
     enabled             = true
-    interval            = 10
+    interval            = 30
     path                = "/"
     port                = "3000"
     protocol            = "HTTP"
     timeout             = 5
-    healthy_threshold   = 3
+    healthy_threshold   = 2
     unhealthy_threshold = 2
     matcher             = "200-299"
   }
@@ -157,7 +157,7 @@ resource "aws_lb_listener" "http_redirect" {
 resource "aws_autoscaling_group" "frontend" {
   name                      = "frontend-asg"
   min_size                  = 1
-  max_size                  = 6
+  max_size                  = 1
   desired_capacity          = 1
   vpc_zone_identifier       = module.vpc.public_subnets
   health_check_type         = "ELB"
@@ -302,17 +302,54 @@ resource "aws_cloudwatch_metric_alarm" "low_cpu_frontend" {
 
 #######################################################################################################
 
+resource "aws_iam_role" "backend_ec2_role" {
+  name = "backend-ec2-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = "sts:AssumeRole"
+        Effect = "Allow"
+        Principal = {
+          Service = "ec2.amazonaws.com"
+        }
+      }
+    ]
+  })
+}
+
+# Attach the EC2 Full Access policy to the IAM role
+resource "aws_iam_policy_attachment" "backend_ec2_full_access" {
+  name       = "backend-policy-attachment"
+  roles      = [aws_iam_role.backend_ec2_role.name]
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEC2FullAccess"
+}
+
+# Create an IAM instance profile for the role
+resource "aws_iam_instance_profile" "backend-ec2_profile" {
+  name = "backend-ec2-profile"
+  role = aws_iam_role.backend_ec2_role.name
+}
+
+
 resource "aws_launch_template" "backend-template" {
   name_prefix   = "main-template-"
   image_id      = var.ami_id
   instance_type = var.instance_type
   key_name      = aws_key_pair.generated.key_name
-
+  iam_instance_profile {
+    name = aws_iam_instance_profile.backend-ec2_profile.name
+  }
 
   user_data = base64encode(<<-EOF
-              #!/bin/bash
-
-              EOF
+#!/bin/bash
+set -xe
+yum install -y git ansible
+git clone -b ec2-deployment https://github.com/santoshpalla27/user-app-redis-mysql.git
+cd user-app-redis-mysql/ansible
+ansible-playbook backend.yml
+EOF
   )
 
 
@@ -353,12 +390,12 @@ resource "aws_lb_target_group" "backend_tg" {
 
   health_check {
     enabled             = true
-    interval            = 10
-    path                = "/"
+    interval            = 30
+    path                = "/api/health"
     port                = "5000"
     protocol            = "HTTP"
     timeout             = 5
-    healthy_threshold   = 3
+    healthy_threshold   = 2
     unhealthy_threshold = 2
     matcher             = "200-299"
   }
@@ -403,7 +440,7 @@ resource "aws_lb_listener" "http_redirect_backend" {
 resource "aws_autoscaling_group" "backend" {
   name                      = "backend-asg"
   min_size                  = 1
-  max_size                  = 6
+  max_size                  = 1
   desired_capacity          = 1
   vpc_zone_identifier       = module.vpc.public_subnets
   health_check_type         = "ELB"
@@ -444,6 +481,9 @@ resource "aws_autoscaling_group" "backend" {
     value               = "asg-backend-instance"
     propagate_at_launch = true
   }
+
+
+  depends_on = [ aws_instance.redis , aws_instance.my-sql ]
 }
 
 
@@ -511,7 +551,6 @@ resource "aws_cloudwatch_metric_alarm" "low_cpu_backend" {
 
 
 #=================================================================================================
-
 
 # Create an IAM role for EC2 with EC2 Full Access
 resource "aws_iam_role" "redis_ec2_role" {

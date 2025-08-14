@@ -14,7 +14,7 @@
     "web-vitals": "^2.1.4"
   },
   "scripts": {
-    "start": "react-scripts start --disable-host-check",
+    "start": "HOST=0.0.0.0 react-scripts start --disable-host-check",
     "build": "react-scripts build",
     "test": "react-scripts test",
     "eject": "react-scripts eject"
