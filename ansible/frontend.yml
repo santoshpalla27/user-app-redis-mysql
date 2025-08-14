@@ -1,16 +1,13 @@
 ---
-- name: Install Docker, Clone Repo, and Deploy Frontend Container
+- name: Install Docker and Deploy Frontend Container
   hosts: localhost
   connection: local
   become: yes
   vars:
-    repo_url: "https://github.com/santoshpalla27/user-app-redis-mysql.git"
-    repo_branch: "ec2-deployment"
-    repo_dir: "/opt/user-app-redis-mysql"
-    container_name: "frontend"
+    container_name: "user-app-frontend"
     container_port: 3000
-    image_name: "frontend-app"
-    image_tag: "latest"
+    image_name: "santoshpalla27/user-app:frontend-v1"
+    api_url: "http://backend.santosh.website"
 
   tasks:
     - name: Verify running on Amazon Linux
@@ -23,12 +20,9 @@
         name: "*"
         state: latest
 
-    - name: Install required packages (Amazon Linux)
+    - name: Install Docker
       yum:
-        name:
-          - git
-          - docker
-          - python3-pip
+        name: docker
         state: present
 
     - name: Try installing Docker Python library via yum first
@@ -61,69 +55,30 @@
     - name: Reset connection to pick up new group membership
       meta: reset_connection
 
-    - name: Remove existing repository directory if it exists
-      file:
-        path: "{{ repo_dir }}"
-        state: absent
-
-    - name: Clone the repository
-      git:
-        repo: "{{ repo_url }}"
-        dest: "{{ repo_dir }}"
-        version: "{{ repo_branch }}"
-        force: yes
-
-    - name: Check if Dockerfile exists in frontend directory
-      stat:
-        path: "{{ repo_dir }}/frontend/Dockerfile"
-      register: dockerfile_check
-
-    - name: Fail if Dockerfile doesn't exist
-      fail:
-        msg: "Dockerfile not found in {{ repo_dir }}/frontend/"
-      when: not dockerfile_check.stat.exists
-
     - name: Stop existing frontend container if running
       docker_container:
         name: "{{ container_name }}"
         state: absent
       ignore_errors: yes
 
-    - name: Remove existing frontend image
+    - name: Pull the frontend image
       docker_image:
-        name: "{{ image_name }}:{{ image_tag }}"
-        state: absent
-        force_absent: yes
-      ignore_errors: yes
-
-    - name: Build Docker image from frontend directory
-      docker_image:
-        build:
-          path: "{{ repo_dir }}/frontend"
-          dockerfile: Dockerfile
         name: "{{ image_name }}"
-        tag: "{{ image_tag }}"
-        source: build
-        force_source: yes
+        source: pull
+        state: present
 
     - name: Run frontend container
       docker_container:
         name: "{{ container_name }}"
-        image: "{{ image_name }}:{{ image_tag }}"
+        image: "{{ image_name }}"
         state: started
         restart_policy: unless-stopped
         ports:
           - "{{ container_port }}:{{ container_port }}"
         env:
-          NODE_ENV: production
-        healthcheck:
-          test: ["CMD", "curl", "-f", "http://localhost:{{ container_port }}/"]
-          interval: 30s
-          timeout: 10s
-          retries: 3
-          start_period: 40s
+          REACT_APP_API_URL: "{{ api_url }}"
 
-    - name: Wait for container to be healthy
+    - name: Wait for container to start
       wait_for:
         host: localhost
         port: "{{ container_port }}"
@@ -139,17 +94,14 @@
       debug:
         msg: |
           Container Status: {{ container_info.container.State.Status }}
-          Container Health: {{ container_info.container.State.Health.Status | default('N/A') }}
+          Container ID: {{ container_info.container.Id }}
           Port Mapping: {{ container_info.container.NetworkSettings.Ports }}
+          Image: {{ container_info.container.Config.Image }}
 
-    - name: Clean up unused Docker images
-      docker_prune:
-        images: yes
-        images_filters:
-          dangling: false
-
-  handlers:
-    - name: restart docker
-      systemd:
-        name: docker
-        state: restarted
+    - name: Display access information
+      debug:
+        msg: |
+          Frontend application is now running!
+          Access it at: http://localhost:{{ container_port }}
+          Container name: {{ container_name }}
+          API URL configured: {{ api_url }}

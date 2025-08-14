@@ -1,0 +1,196 @@
+---
+- name: Setup Backend Application with Dynamic AWS Instance Discovery
+  hosts: localhost
+  become: yes
+  vars:
+    # Application configuration
+    backend_container_name: "user-app-backend"
+    backend_image: "santoshpalla27/user-app:backend-v1"
+    backend_port: 5000
+    
+    # Database configuration
+    mysql_user: "user"
+    mysql_password: "password"
+    mysql_root_password: "rootpassword"
+    mysql_database: "userdb"
+    
+    # Redis configuration
+    redis_password: "redis123"
+    redis_port: 6379
+    
+    # Environment
+    node_env: "development"
+    
+  tasks:
+    - name: Install required packages
+      yum:
+        name:
+          - docker
+          - python3-pip
+          - python3-setuptools
+        state: present
+
+    - name: Start and enable Docker
+      systemd:
+        name: docker
+        state: started
+        enabled: yes
+
+    - name: Upgrade pip using package manager
+      yum:
+        name: python3-pip
+        state: latest
+
+    - name: Try installing AWS SDK via yum first
+      yum:
+        name:
+          - python3-boto3
+          - python3-botocore
+        state: present
+      ignore_errors: yes
+      register: yum_aws_install
+
+    - name: Install AWS SDK libraries via pip (fallback)
+      pip:
+        name:
+          - boto3
+          - botocore
+        state: present
+        executable: pip3
+        extra_args: --user --break-system-packages
+      when: yum_aws_install is failed
+
+    - name: Try installing Docker SDK via yum first
+      yum:
+        name: python3-docker
+        state: present
+      ignore_errors: yes
+      register: yum_docker_install
+
+    - name: Install Docker SDK via pip (fallback)
+      pip:
+        name: docker
+        state: present
+        executable: pip3
+        extra_args: --user --break-system-packages
+      when: yum_docker_install is failed
+
+    - name: Add ec2-user to Docker group
+      user:
+        name: ec2-user
+        groups: docker
+        append: yes
+
+    - name: Fetch cache instances private IPs
+      amazon.aws.ec2_instance_info:
+        filters:
+          "tag:Name": "redis*"
+        region: us-east-1  
+      register: cache_instances
+      delegate_to: localhost
+      run_once: true
+      ignore_errors: yes
+
+    - name: Fetch MySQL instance private IP
+      amazon.aws.ec2_instance_info:
+        filters:
+          "tag:Name": "my-sql-instance*"
+        region: us-east-1  
+      register: mysql_instances
+      delegate_to: localhost
+      run_once: true
+      ignore_errors: yes
+
+    - name: Set Redis cluster nodes from cache instances
+      set_fact:
+        redis_nodes: "{{ cache_instances.instances | map(attribute='private_ip_address') | list }}"
+      when: cache_instances.instances is defined and cache_instances.instances | length > 0
+
+    - name: Set MySQL host from MySQL instances
+      set_fact:
+        mysql_host: "{{ mysql_instances.instances[0].private_ip_address }}"
+      when: mysql_instances.instances is defined and mysql_instances.instances | length > 0
+
+    - name: Build Redis nodes string for environment variable
+      set_fact:
+        redis_nodes_env: "{{ redis_nodes | map('regex_replace', '^(.*)$', '\\1:' + redis_port|string) | join(',') }}"
+      when: redis_nodes is defined
+
+    - name: Display configuration
+      debug:
+        msg: |
+          Cache instances found: {{ cache_instances.instances | length if cache_instances.instances is defined else 0 }}
+          MySQL instances found: {{ mysql_instances.instances | length if mysql_instances.instances is defined else 0 }}
+          Redis nodes: {{ redis_nodes | default('Not found') }}
+          Redis nodes env: {{ redis_nodes_env | default('Not configured') }}
+          MySQL host: {{ mysql_host | default('Not found') }}
+
+    - name: Fail if required instances not found
+      fail:
+        msg: |
+          Required instances not found:
+          Cache instances: {{ cache_instances.instances | length if cache_instances.instances is defined else 0 }}
+          MySQL instances: {{ mysql_instances.instances | length if mysql_instances.instances is defined else 0 }}
+      when: >
+        (cache_instances.instances is not defined or cache_instances.instances | length == 0) or
+        (mysql_instances.instances is not defined or mysql_instances.instances | length == 0)
+
+    - name: Stop existing backend container if running
+      docker_container:
+        name: "{{ backend_container_name }}"
+        state: absent
+      ignore_errors: yes
+
+    - name: Pull backend image
+      docker_image:
+        name: "{{ backend_image }}"
+        source: pull
+        state: present
+      ignore_errors: yes
+
+    - name: Run backend container
+      docker_container:
+        name: "{{ backend_container_name }}"
+        image: "{{ backend_image }}"
+        state: started
+        restart_policy: unless-stopped
+        ports:
+          - "{{ backend_port }}:{{ backend_port }}"
+        env:
+          NODE_ENV: "{{ node_env }}"
+          PORT: "{{ backend_port | string }}"
+          MYSQL_HOST: "{{ mysql_host }}"
+          MYSQL_ROOT_PASSWORD: "{{ mysql_root_password }}"
+          MYSQL_DATABASE: "{{ mysql_database }}"
+          MYSQL_USER: "{{ mysql_user }}"
+          MYSQL_PASSWORD: "{{ mysql_password }}"
+          REDIS_NODES: "{{ redis_nodes_env }}"
+          REDIS_PASSWORD: "{{ redis_password }}"
+      when: mysql_host is defined and redis_nodes_env is defined
+
+    - name: Wait for backend container to start
+      wait_for:
+        host: localhost
+        port: "{{ backend_port }}"
+        delay: 10
+        timeout: 60
+
+    - name: Verify backend container is running
+      docker_container_info:
+        name: "{{ backend_container_name }}"
+      register: backend_container_info
+
+    - name: Display backend container status
+      debug:
+        msg: |
+          Container Status: {{ backend_container_info.container.State.Status }}
+          Container ID: {{ backend_container_info.container.Id }}
+          Port Mapping: {{ backend_container_info.container.NetworkSettings.Ports }}
+          Environment Variables:
+            NODE_ENV: {{ node_env }}
+            PORT: {{ backend_port }}
+            MYSQL_HOST: {{ mysql_host }}
+            REDIS_NODES: {{ redis_nodes_env }}
+          
+          Backend application is now running!
+          Access it at: http://localhost:{{ backend_port }}
