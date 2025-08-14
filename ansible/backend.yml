@@ -85,6 +85,7 @@
       amazon.aws.ec2_instance_info:
         filters:
           "tag:Name": "redis*"
+          "instance-state-name": "running"
         region: us-east-1  
       register: cache_instances
       delegate_to: localhost
@@ -95,21 +96,57 @@
       amazon.aws.ec2_instance_info:
         filters:
           "tag:Name": "my-sql-instance*"
+          "instance-state-name": "running"
         region: us-east-1  
       register: mysql_instances
       delegate_to: localhost
       run_once: true
       ignore_errors: yes
 
+    - name: Debug cache instances output
+      debug:
+        var: cache_instances
+      when: cache_instances is defined
+
+    - name: Debug MySQL instances output
+      debug:
+        var: mysql_instances
+      when: mysql_instances is defined
+
     - name: Set Redis cluster nodes from cache instances
       set_fact:
         redis_nodes: "{{ cache_instances.instances | map(attribute='private_ip_address') | list }}"
-      when: cache_instances.instances is defined and cache_instances.instances | length > 0
+      when: 
+        - cache_instances.instances is defined 
+        - cache_instances.instances | length > 0
+        - cache_instances.instances[0].private_ip_address is defined
+
+    - name: Alternative Redis nodes extraction (if standard method fails)
+      set_fact:
+        redis_nodes: "{{ cache_instances.instances | map(attribute='network_interfaces') | map('first') | map(attribute='private_ip_address') | list }}"
+      when: 
+        - redis_nodes is not defined
+        - cache_instances.instances is defined 
+        - cache_instances.instances | length > 0
+        - cache_instances.instances[0].network_interfaces is defined
 
     - name: Set MySQL host from MySQL instances
       set_fact:
         mysql_host: "{{ mysql_instances.instances[0].private_ip_address }}"
-      when: mysql_instances.instances is defined and mysql_instances.instances | length > 0
+      when: 
+        - mysql_instances.instances is defined 
+        - mysql_instances.instances | length > 0
+        - mysql_instances.instances[0].private_ip_address is defined
+
+    - name: Alternative MySQL host extraction (if standard method fails)
+      set_fact:
+        mysql_host: "{{ mysql_instances.instances[0].network_interfaces[0].private_ip_address }}"
+      when: 
+        - mysql_host is not defined
+        - mysql_instances.instances is defined 
+        - mysql_instances.instances | length > 0
+        - mysql_instances.instances[0].network_interfaces is defined
+        - mysql_instances.instances[0].network_interfaces | length > 0
 
     - name: Build Redis nodes string for environment variable
       set_fact:
@@ -131,9 +168,15 @@
           Required instances not found:
           Cache instances: {{ cache_instances.instances | length if cache_instances.instances is defined else 0 }}
           MySQL instances: {{ mysql_instances.instances | length if mysql_instances.instances is defined else 0 }}
+          
+          Please ensure:
+          1. Redis instances are tagged with Name starting with 'redis'
+          2. MySQL instances are tagged with Name starting with 'my-sql-instance'
+          3. All instances are in 'running' state
+          4. Instances are in the us-east-1 region
       when: >
-        (cache_instances.instances is not defined or cache_instances.instances | length == 0) or
-        (mysql_instances.instances is not defined or mysql_instances.instances | length == 0)
+        (redis_nodes is not defined) or
+        (mysql_host is not defined)
 
     - name: Stop existing backend container if running
       docker_container:
@@ -174,23 +217,30 @@
         port: "{{ backend_port }}"
         delay: 10
         timeout: 60
+      when: mysql_host is defined and redis_nodes_env is defined
 
     - name: Verify backend container is running
       docker_container_info:
         name: "{{ backend_container_name }}"
       register: backend_container_info
+      when: mysql_host is defined and redis_nodes_env is defined
 
     - name: Display backend container status
       debug:
         msg: |
-          Container Status: {{ backend_container_info.container.State.Status }}
-          Container ID: {{ backend_container_info.container.Id }}
-          Port Mapping: {{ backend_container_info.container.NetworkSettings.Ports }}
+          Container Status: {{ backend_container_info.container.State.Status if backend_container_info.container is defined else 'Not running' }}
+          Container ID: {{ backend_container_info.container.Id if backend_container_info.container is defined else 'N/A' }}
+          Port Mapping: {{ backend_container_info.container.NetworkSettings.Ports if backend_container_info.container is defined else 'N/A' }}
           Environment Variables:
             NODE_ENV: {{ node_env }}
             PORT: {{ backend_port }}
-            MYSQL_HOST: {{ mysql_host }}
-            REDIS_NODES: {{ redis_nodes_env }}
+            MYSQL_HOST: {{ mysql_host | default('Not configured') }}
+            REDIS_NODES: {{ redis_nodes_env | default('Not configured') }}
           
+          {% if mysql_host is defined and redis_nodes_env is defined %}
           Backend application is now running!
           Access it at: http://localhost:{{ backend_port }}
+          {% else %}
+          Backend application could not be started due to missing configuration.
+          {% endif %}
+      when: mysql_host is defined and redis_nodes_env is defined
