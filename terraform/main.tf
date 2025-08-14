@@ -629,3 +629,25 @@ resource "aws_instance" "redis" {
 }
 
 
+
+
+resource "ec2-instance" "my-sql" {
+  ami                   = var.ami_id
+  instance_type         = var.instance_type
+  subnet_id             = module.vpc.public_subnets[0]
+  key_name              = aws_key_pair.generated.key_name
+  vpc_security_group_ids = [aws_security_group.my_sql_sg.id]
+  associate_public_ip_address = true
+  user_data = base64encode(<<-EOF
+              #!/bin/bash
+              apt update -y
+              apt install -y git ansible 
+              git clone -b ec2-deployment https://github.com/santoshpalla27/user-app-redis-mysql.git
+              cd user-app-redis-mysql/ansible        
+              ansible-playbook mysql.yml 
+              EOF
+  )
+  tags = {
+    Name = "my-sql-instance"
+  }
+}

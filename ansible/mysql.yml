@@ -1,0 +1,166 @@
+---
+- name: Install Docker, Clone Repo, and Deploy MySQL Container
+  hosts: localhost
+  connection: local
+  become: yes
+  vars:
+    repo_url: "https://github.com/santoshpalla27/user-app-redis-mysql.git"
+    repo_branch: "ec2-deployment"
+    repo_dir: "/opt/user-app-redis-mysql"
+    container_name: "my-sql"
+    container_port: 3306
+
+  tasks:
+    - name: Verify running on Amazon Linux
+      fail:
+        msg: "This playbook is designed for Amazon Linux only. Current OS: {{ ansible_distribution }}"
+      when: ansible_distribution != "Amazon"
+
+    - name: Update system packages (Amazon Linux)
+      yum:
+        name: "*"
+        state: latest
+
+    - name: Install required packages (Amazon Linux)
+      yum:
+        name:
+          - git
+          - docker
+          - python3-pip
+          - curl
+        state: present
+
+    - name: Try installing Docker Python library via yum first
+      yum:
+        name: python3-docker
+        state: present
+      ignore_errors: yes
+      register: yum_docker_install
+
+    - name: Install Docker Python library via pip (fallback)
+      pip:
+        name: docker
+        executable: pip3
+        extra_args: --user --break-system-packages
+      become: no
+      when: yum_docker_install is failed
+
+    - name: Start and enable Docker service
+      systemd:
+        name: docker
+        state: started
+        enabled: yes
+
+    - name: Add current user to docker group
+      user:
+        name: "{{ ansible_user_id }}"
+        groups: docker
+        append: yes
+
+    - name: Reset connection to pick up new group membership
+      meta: reset_connection
+
+    - name: Check if Docker Compose is already installed
+      command: docker-compose --version
+      register: docker_compose_check
+      ignore_errors: yes
+      changed_when: false
+
+    - name: Get latest Docker Compose version
+      uri:
+        url: https://api.github.com/repos/docker/compose/releases/latest
+        method: GET
+        return_content: yes
+      register: compose_latest_release
+      when: docker_compose_check is failed
+
+    - name: Install Docker Compose
+      get_url:
+        url: "https://github.com/docker/compose/releases/download/{{ compose_latest_release.json.tag_name }}/docker-compose-Linux-x86_64"
+        dest: /usr/local/bin/docker-compose
+        mode: '0755'
+        owner: root
+        group: root
+      when: docker_compose_check is failed
+
+    - name: Create symbolic link for docker-compose
+      file:
+        src: /usr/local/bin/docker-compose
+        dest: /usr/bin/docker-compose
+        state: link
+      when: docker_compose_check is failed
+
+    - name: Verify Docker Compose installation
+      command: docker-compose --version
+      register: compose_version_output
+      changed_when: false
+
+    - name: Display Docker Compose version
+      debug:
+        msg: "Docker Compose installed: {{ compose_version_output.stdout }}"
+
+    - name: Remove existing repository directory if it exists
+      file:
+        path: "{{ repo_dir }}"
+        state: absent
+
+    - name: Clone the repository
+      git:
+        repo: "{{ repo_url }}"
+        dest: "{{ repo_dir }}"
+        version: "{{ repo_branch }}"
+        force: yes
+
+    - name: Change ownership of cloned repository
+      file:
+        path: "{{ repo_dir }}"
+        owner: "{{ ansible_user_id }}"
+        group: "{{ ansible_user_id }}"
+        recurse: yes
+
+    - name: Check if docker-compose.yml exists in mysql directory
+      stat:
+        path: "{{ repo_dir }}/mysql/docker-compose.yml"
+      register: compose_file_check
+
+    - name: Fail if docker-compose.yml doesn't exist
+      fail:
+        msg: "docker-compose.yml not found in {{ repo_dir }}/mysql/"
+      when: not compose_file_check.stat.exists
+
+    - name: Stop any existing containers in mysql directory
+      command: docker-compose down
+      args:
+        chdir: "{{ repo_dir }}/mysql"
+      ignore_errors: yes
+      become: no
+
+    - name: Deploy MySQL container using docker-compose
+      command: docker-compose up -d
+      args:
+        chdir: "{{ repo_dir }}/mysql"
+      become: no
+      register: compose_output
+
+    - name: Display docker-compose output
+      debug:
+        msg: "{{ compose_output.stdout }}"
+
+    - name: Wait for MySQL container to be ready
+      wait_for:
+        port: "{{ container_port }}"
+        host: localhost
+        delay: 10
+        timeout: 60
+      ignore_errors: yes
+
+    - name: Verify MySQL container is running
+      command: docker-compose ps
+      args:
+        chdir: "{{ repo_dir }}/mysql"
+      register: container_status
+      become: no
+
+    - name: Display container status
+      debug:
+        msg: "{{ container_status.stdout }}"

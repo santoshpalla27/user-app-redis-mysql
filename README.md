@@ -106,3 +106,29 @@ docker exec -it redis-node-0 redis-cli -c -h 127.0.0.1 -p 6379 -a bitnami123 key
 
 
 working when started at first
+
+
+
+
+docker run -d \
+  --name user-app-backend \
+  -p 5000:5000 \
+  -e NODE_ENV=development \
+  -e PORT=5000 \
+  -e MYSQL_HOST=18.207.193.190 \
+  -e MYSQL_ROOT_PASSWORD=rootpassword \
+  -e MYSQL_DATABASE=userdb \
+  -e MYSQL_USER=user \
+  -e MYSQL_PASSWORD=password \
+  -e REDIS_NODES=redis-node-0:6379,redis-node-1:6379,redis-node-2:6379,redis-node-3:6379,redis-node-4:6379,redis-node-5:6379 \
+  -e REDIS_PASSWORD=bitnami123 \
+  backend:latest
+
+
+
+docker run --rm -it mysql:8.0 \
+  mysql -h18.207.193.190 -uuser -ppassword userdb
+
+
+docker run --rm -it --network container:mysql_prod mysql:8.0 \
+  mysql -hmysql_prod -uuser -ppassword userdb                       -- in same instance 
