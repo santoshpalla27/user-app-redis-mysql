@@ -1,4 +1,4 @@
-# # Data source for Route53 zone (moved to top for better organization)
+# # Data source for Route53 zone (moved to top for better organization)         this is in route53.tf
 # data "aws_route53_zone" "primary" {
 #   name         = "santosh.website"
 #   private_zone = false

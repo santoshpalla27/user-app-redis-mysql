@@ -72,7 +72,7 @@ EOF
 
   network_interfaces {
     security_groups             = [aws_security_group.ec2_sg.id]
-    associate_public_ip_address = true
+    # associate_public_ip_address = true  # Uncomment if you want a public IP and the instance is in a public subnet
   }
 
   lifecycle {
@@ -159,7 +159,7 @@ resource "aws_autoscaling_group" "frontend" {
   min_size                  = 1
   max_size                  = 1
   desired_capacity          = 1
-  vpc_zone_identifier       = module.vpc.public_subnets
+  vpc_zone_identifier       = module.vpc.private_subnets
   health_check_type         = "ELB"
   health_check_grace_period = 300
   force_delete              = true
@@ -355,7 +355,7 @@ EOF
 
   network_interfaces {
     security_groups             = [aws_security_group.ec2_sg.id]
-    associate_public_ip_address = true
+    # associate_public_ip_address = true  # Uncomment if you want a public IP and the instance is in a public subnet
   }
 
   lifecycle {
@@ -442,7 +442,7 @@ resource "aws_autoscaling_group" "backend" {
   min_size                  = 1
   max_size                  = 1
   desired_capacity          = 1
-  vpc_zone_identifier       = module.vpc.public_subnets
+  vpc_zone_identifier       = module.vpc.private_subnets
   health_check_type         = "ELB"
   health_check_grace_period = 300
   force_delete              = true
@@ -588,9 +588,9 @@ resource "aws_instance" "redis" {
   count                  = var.instance_count
   ami                    = var.ami_id
   instance_type          = var.instance_type
-  subnet_id              = element(module.vpc.public_subnets, count.index % length(module.vpc.public_subnets))
+  subnet_id              = element(module.vpc.private_subnets, count.index % length(module.vpc.private_subnets))
   key_name               = aws_key_pair.generated.key_name
-  associate_public_ip_address = true
+  # associate_public_ip_address = true  # Uncomment if you want a public IP and the instance is in a public subnet
   vpc_security_group_ids = [aws_security_group.redis_sg.id]
   iam_instance_profile   = aws_iam_instance_profile.redis_ec2_profile.name
 
@@ -673,10 +673,10 @@ resource "aws_instance" "redis" {
 resource "aws_instance" "my-sql" {
   ami                         = var.ami_id
   instance_type               = var.instance_type
-  subnet_id                   = module.vpc.public_subnets[0]
+  subnet_id                   = module.vpc.private_subnets[0]
   key_name                    = aws_key_pair.generated.key_name
   vpc_security_group_ids      = [aws_security_group.my_sql_sg.id]
-  associate_public_ip_address = true
+  # associate_public_ip_address = true  # Uncomment if you want a public IP and the instance is in a public subnet
 
   user_data = base64encode(<<-EOF
 #!/bin/bash
@@ -690,5 +690,20 @@ EOF
 
   tags = {
     Name = "my-sql-instance"
+  }
+}
+
+
+
+
+resource "aws_instance" "check" {
+  ami                         = var.ami_id
+  instance_type               = var.instance_type
+  subnet_id                   = module.vpc.public_subnets[0]
+  key_name                    = aws_key_pair.generated.key_name
+  vpc_security_group_ids      = [aws_security_group.my_sql_sg.id]
+  associate_public_ip_address = true  # Uncomment if you want a public IP and the instance is in a public subnet
+  tags = {
+    Name = "my-instance"
   }
 }
