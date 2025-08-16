@@ -1,8 +1,8 @@
-# Data source for Route53 zone (moved to top for better organization)
-data "aws_route53_zone" "primary" {
-  name         = "santosh.website"
-  private_zone = false
-}
+# # Data source for Route53 zone (moved to top for better organization)
+# data "aws_route53_zone" "primary" {
+#   name         = "santosh.website"
+#   private_zone = false
+# }
 
 # Request ACM Certificate
 resource "aws_acm_certificate" "multi_domain_cert" {
