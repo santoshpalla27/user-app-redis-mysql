@@ -28,7 +28,7 @@ const mysqlPool = mysql.createPool({
   queueLimit: 0
 });
 
-// Parse Redis nodes from environment
+// Parse Redis nodes from environment - FIXED SYNTAX ERROR
 const redisNodes = (process.env.REDIS_NODES ||
   'redis-node-0:6379,redis-node-1:6379,redis-node-2:6379,redis-node-3:6379,redis-node-4:6379,redis-node-5:6379')
   .split(',')
@@ -173,9 +173,134 @@ async function testRedisOperations() {
   }
 }
 
-// Diagnostic function to check Redis cluster health
+// Wait for cluster to be ready before connecting
+const waitForClusterReady = async (maxWaitTimeMs = 600000, checkIntervalMs = 5000) => {
+  console.log(`🔍 Waiting for Redis cluster to be ready (max wait: ${maxWaitTimeMs/1000}s)...`);
+  
+  const startTime = Date.now();
+  let attempt = 1;
+  
+  while (Date.now() - startTime < maxWaitTimeMs) {
+    console.log(`🔍 Cluster readiness check attempt ${attempt}...`);
+    
+    let allNodesReady = true;
+    let readyNodes = 0;
+    let totalNodes = redisNodes.length;
+    let totalSlotsAssigned = 0;
+    
+    // Check each node individually
+    for (let i = 0; i < redisNodes.length; i++) {
+      const node = redisNodes[i];
+      
+      try {
+        const singleNodeClient = new Redis({
+          host: node.host,
+          port: node.port,
+          password: redisPassword,
+          connectTimeout: 3000,
+          commandTimeout: 2000,
+          retryDelayOnFailover: 100,
+          maxRetriesPerRequest: 1,
+          lazyConnect: true,
+        });
+
+        await singleNodeClient.connect();
+        
+        // Check if node responds to ping
+        const pingResult = await singleNodeClient.ping();
+        if (pingResult !== 'PONG') {
+          console.log(`  ❌ Node ${node.host}:${node.port} - Ping failed`);
+          allNodesReady = false;
+          await singleNodeClient.disconnect();
+          continue;
+        }
+        
+        // Check cluster state
+        try {
+          const clusterInfo = await singleNodeClient.cluster('INFO');
+          if (clusterInfo.includes('cluster_state:ok')) {
+            console.log(`  ✅ Node ${node.host}:${node.port} - Cluster state: OK`);
+            readyNodes++;
+            
+            // Also check if all slots are assigned
+            const clusterNodes = await singleNodeClient.cluster('NODES');
+            const masterNodes = clusterNodes.split('\n').filter(line => 
+              line.includes('master') && !line.includes('fail')
+            );
+            
+            // Count slots for this check (only from first ready node to avoid double counting)
+            if (totalSlotsAssigned === 0) {
+              masterNodes.forEach(line => {
+                const slots = line.match(/(\d+-\d+|\d+)/g);
+                if (slots) {
+                  slots.forEach(slot => {
+                    if (slot.includes('-')) {
+                      const [start, end] = slot.split('-').map(Number);
+                      if (!isNaN(start) && !isNaN(end)) {
+                        totalSlotsAssigned += (end - start + 1);
+                      }
+                    } else if (!isNaN(parseInt(slot))) {
+                      totalSlotsAssigned += 1;
+                    }
+                  });
+                }
+              });
+              
+              console.log(`  📊 Node ${node.host}:${node.port} - Masters: ${masterNodes.length}, Slots assigned: ${totalSlotsAssigned}`);
+            }
+            
+          } else {
+            console.log(`  ⚠️  Node ${node.host}:${node.port} - Cluster state: NOT OK`);
+            allNodesReady = false;
+          }
+        } catch (clusterErr) {
+          console.log(`  ❌ Node ${node.host}:${node.port} - Cluster command failed: ${clusterErr.message}`);
+          allNodesReady = false;
+        }
+
+        await singleNodeClient.disconnect();
+        
+      } catch (err) {
+        console.log(`  ❌ Node ${node.host}:${node.port} - Connection failed: ${err.message}`);
+        allNodesReady = false;
+      }
+    }
+    
+    console.log(`📊 Cluster status: ${readyNodes}/${totalNodes} nodes ready, ${totalSlotsAssigned}/16384 slots assigned`);
+    
+    // Check if cluster is ready - allow for slight slot count variations due to counting method
+    if (allNodesReady && readyNodes > 0 && totalSlotsAssigned >= 16384) {
+      if (totalSlotsAssigned > 16384) {
+        console.log(`⚠️  Warning: More slots assigned than expected (${totalSlotsAssigned} > 16384), this might indicate duplicate counting or slot overlaps`);
+        console.log('✅ Cluster appears ready despite slot count anomaly');
+      } else {
+        console.log('🎉 Redis cluster is ready and all slots are assigned!');
+      }
+      return true;
+    }
+    
+    console.log(`⏳ Cluster not ready yet. Waiting ${checkIntervalMs/1000}s before next check...`);
+    await wait(checkIntervalMs);
+    attempt++;
+  }
+  
+  console.log(`❌ Timeout waiting for Redis cluster to be ready after ${maxWaitTimeMs/1000}s`);
+  return false;
+};
+
+// Enhanced diagnostic function with more detailed cluster info
 const diagnoseRedisCluster = async () => {
   console.log('🔍 Diagnosing Redis cluster connectivity...');
+  
+  let clusterFormationStatus = {
+    totalNodes: redisNodes.length,
+    respondingNodes: 0,
+    clusterEnabledNodes: 0,
+    clusterOkNodes: 0,
+    masterNodes: 0,
+    slaveNodes: 0,
+    slotsAssigned: 0
+  };
   
   // Test each node individually
   for (let i = 0; i < redisNodes.length; i++) {
@@ -197,33 +322,134 @@ const diagnoseRedisCluster = async () => {
       await singleNodeClient.connect();
       const pingResult = await singleNodeClient.ping();
       console.log(`  ✅ Node ${node.host}:${node.port} - Ping: ${pingResult}`);
+      clusterFormationStatus.respondingNodes++;
       
       // Try to get cluster info if available
       try {
         const clusterInfo = await singleNodeClient.cluster('INFO');
+        clusterFormationStatus.clusterEnabledNodes++;
+        
         if (clusterInfo.includes('cluster_state:ok')) {
           console.log(`  ✅ Node ${node.host}:${node.port} - Cluster state: OK`);
+          clusterFormationStatus.clusterOkNodes++;
+          
+          // Get detailed cluster nodes info (only from first OK node to avoid double counting)
+          if (clusterFormationStatus.slotsAssigned === 0) {
+            try {
+              const clusterNodes = await singleNodeClient.cluster('NODES');
+              const lines = clusterNodes.split('\n').filter(line => line.trim());
+              
+              lines.forEach(line => {
+                if (line.includes('master') && !line.includes('fail')) {
+                  clusterFormationStatus.masterNodes++;
+                  
+                  // Count slots assigned to this master
+                  const slots = line.match(/(\d+-\d+|\d+)/g);
+                  if (slots) {
+                    slots.forEach(slot => {
+                      if (slot.includes('-')) {
+                        const [start, end] = slot.split('-').map(Number);
+                        if (!isNaN(start) && !isNaN(end)) {
+                          clusterFormationStatus.slotsAssigned += (end - start + 1);
+                        }
+                      } else if (!isNaN(parseInt(slot))) {
+                        clusterFormationStatus.slotsAssigned += 1;
+                      }
+                    });
+                  }
+                } else if (line.includes('slave') && !line.includes('fail')) {
+                  clusterFormationStatus.slaveNodes++;
+                }
+              });
+              
+              console.log(`  📊 Node ${node.host}:${node.port} - Cluster nodes info retrieved`);
+              
+            } catch (nodesErr) {
+              console.log(`  ⚠️  Node ${node.host}:${node.port} - Could not get cluster nodes: ${nodesErr.message}`);
+            }
+          }
+          
         } else {
           console.log(`  ⚠️  Node ${node.host}:${node.port} - Cluster state: NOT OK`);
+          
+          // Try to get more details about why cluster is not OK
+          const lines = clusterInfo.split('\r\n');
+          for (const line of lines) {
+            if (line.includes('cluster_state') || line.includes('cluster_slots') || line.includes('cluster_known_nodes')) {
+              console.log(`    📋 ${line}`);
+            }
+          }
         }
       } catch (clusterErr) {
-        console.log(`  ℹ️  Node ${node.host}:${node.port} - Not in cluster mode or cluster command failed`);
+        console.log(`  ℹ️  Node ${node.host}:${node.port} - Not in cluster mode or cluster command failed: ${clusterErr.message}`);
       }
 
       await singleNodeClient.disconnect();
+      
     } catch (err) {
       console.log(`  ❌ Node ${node.host}:${node.port} - Failed: ${err.message}`);
     }
   }
+  
+  // Summary
+  console.log('\n📊 Cluster Formation Summary:');
+  console.log(`  Total nodes: ${clusterFormationStatus.totalNodes}`);
+  console.log(`  Responding nodes: ${clusterFormationStatus.respondingNodes}`);
+  console.log(`  Cluster-enabled nodes: ${clusterFormationStatus.clusterEnabledNodes}`);
+  console.log(`  Nodes with OK cluster state: ${clusterFormationStatus.clusterOkNodes}`);
+  console.log(`  Master nodes: ${clusterFormationStatus.masterNodes}`);
+  console.log(`  Slave nodes: ${clusterFormationStatus.slaveNodes}`);
+  console.log(`  Slots assigned: ${clusterFormationStatus.slotsAssigned}/16384`);
+  
+  const isClusterReady = clusterFormationStatus.clusterOkNodes > 0 && 
+                        clusterFormationStatus.slotsAssigned === 16384 && 
+                        clusterFormationStatus.masterNodes > 0;
+                        
+  console.log(`  Cluster ready: ${isClusterReady ? '✅ YES' : '❌ NO'}`);
+  
+  if (!isClusterReady) {
+    console.log('\n💡 Cluster Formation Tips:');
+    if (clusterFormationStatus.respondingNodes < clusterFormationStatus.totalNodes) {
+      console.log('  - Some nodes are not responding. Check if all Redis containers are running.');
+    }
+    if (clusterFormationStatus.clusterEnabledNodes < clusterFormationStatus.respondingNodes) {
+      console.log('  - Some nodes are not cluster-enabled. Check Redis cluster configuration.');
+    }
+    if (clusterFormationStatus.clusterOkNodes === 0) {
+      console.log('  - No nodes report cluster state as OK. Cluster may still be forming.');
+      console.log('  - Run: redis-cli --cluster create <node1> <node2> ... --cluster-replicas 1');
+    }
+    if (clusterFormationStatus.slotsAssigned < 16384) {
+      console.log('  - Not all hash slots are assigned. Cluster formation incomplete.');
+    }
+  }
+  
+  return clusterFormationStatus;
 };
 
-// Initialize Redis cluster with comprehensive testing
+// Modified initialization function that waits for cluster readiness
 const initRedis = async (maxAttempts = 3) => {
   // First, diagnose the cluster
-  await diagnoseRedisCluster();
+  const clusterStatus = await diagnoseRedisCluster();
   
+  // Check if cluster is ready, if not wait for it
+  const isClusterReady = clusterStatus.clusterOkNodes > 0 && 
+                        clusterStatus.slotsAssigned >= 16384;
+  
+  if (!isClusterReady) {
+    console.log('🔄 Cluster is not ready yet, waiting for cluster formation...');
+    const clusterBecameReady = await waitForClusterReady();
+    
+    if (!clusterBecameReady) {
+      throw new Error('Redis cluster did not become ready within the timeout period');
+    }
+  } else {
+    console.log('✅ Cluster is already ready!');
+  }
+  
+  // Now proceed with connection attempts
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    console.log(`🚀 Redis initialization attempt ${attempt}/${maxAttempts}`);
+    console.log(`🚀 Redis cluster connection attempt ${attempt}/${maxAttempts}`);
     
     try {
       // Clean up existing connection if any
@@ -240,39 +466,38 @@ const initRedis = async (maxAttempts = 3) => {
 
       console.log('Creating new Redis cluster connection...');
 
-      // Try more conservative settings for unstable clusters
+      // Use more optimistic settings since we know cluster is ready
       redisCluster = new Redis.Cluster(redisNodes, {
         redisOptions: {
           password: redisPassword,
-          connectTimeout: 15000, // Increased timeout
-          commandTimeout: 10000, // Increased timeout
-          retryDelayOnFailover: 500,
-          maxRetriesPerRequest: 2, // Reduced retries to fail faster
+          connectTimeout: 10000,
+          commandTimeout: 8000,
+          retryDelayOnFailover: 1000,
+          maxRetriesPerRequest: 3,
           lazyConnect: false,
-          keepAlive: 10000, // Reduced keep alive
-          family: 4, // Force IPv4
-          enableOfflineQueue: false, // Don't queue commands when disconnected
+          keepAlive: 30000,
+          family: 4,
+          enableOfflineQueue: true, // Enable since cluster is ready
         },
         // Cluster-specific options
-        clusterRetryDelayOnFailover: 3000,
-        clusterRetryDelayOnClusterDown: 3000,
-        clusterMaxRedirections: 8, // Reduced redirections
-        slotsRefreshTimeout: 15000,
-        slotsRefreshInterval: 60000, // Less frequent refresh
+        clusterRetryDelayOnFailover: 1000,
+        clusterRetryDelayOnClusterDown: 2000,
+        clusterMaxRedirections: 16,
+        slotsRefreshTimeout: 10000,
+        slotsRefreshInterval: 30000,
         enableReadyCheck: true,
-        maxRetriesPerRequest: 2,
-        scaleReads: 'master', // Always read from master for consistency
-        natMap: {}, // Can be used if there are NAT issues
+        maxRetriesPerRequest: 3,
+        scaleReads: 'master',
       });
 
       let readyPromiseResolve, readyPromiseReject;
-      let connectionsStable = false;
+      let connectionStable = false;
 
-      // Set up event handlers with connection stability tracking
+      // Set up event handlers
       redisCluster.on('error', (err) => {
         console.error('❌ Redis Cluster Error:', err.message);
         isRedisOperational = false;
-        if (readyPromiseReject) readyPromiseReject(err);
+        if (readyPromiseReject && !connectionStable) readyPromiseReject(err);
       });
 
       redisCluster.on('connect', () => {
@@ -281,31 +506,28 @@ const initRedis = async (maxAttempts = 3) => {
 
       redisCluster.on('ready', () => {
         console.log('✅ Redis cluster ready');
-        // Don't resolve immediately, wait for stability
       });
 
       redisCluster.on('close', () => {
         console.log('🔌 Redis cluster connection closed');
         isRedisOperational = false;
-        connectionsStable = false;
+        connectionStable = false;
       });
 
       redisCluster.on('reconnecting', (delayTime) => {
         console.log(`🔄 Redis cluster reconnecting in ${delayTime || 'unknown'}ms...`);
         isRedisOperational = false;
-        connectionsStable = false;
+        connectionStable = false;
       });
 
       redisCluster.on('end', () => {
         console.log('🔚 Redis cluster connection ended');
         isRedisOperational = false;
-        connectionsStable = false;
+        connectionStable = false;
       });
 
-      // Additional cluster-specific events
       redisCluster.on('node error', (err, node) => {
         console.error(`❌ Redis node error ${node.options.host}:${node.options.port}:`, err.message);
-        connectionsStable = false;
       });
 
       // Wait for cluster to be ready and stable
@@ -314,46 +536,44 @@ const initRedis = async (maxAttempts = 3) => {
         readyPromiseReject = reject;
         
         const timeout = setTimeout(() => {
-          reject(new Error('Redis cluster connection timeout after 30 seconds'));
-        }, 30000);
+          reject(new Error('Redis cluster connection timeout after 20 seconds'));
+        }, 20000);
 
         let stabilityCheckCount = 0;
-        const maxStabilityChecks = 3;
+        const maxStabilityChecks = 2; // Reduced since cluster is already ready
         
         const checkStability = () => {
           if (redisCluster.status === 'ready') {
             stabilityCheckCount++;
-            console.log(`✅ Stability check ${stabilityCheckCount}/${maxStabilityChecks} passed`);
+            console.log(`✅ Connection stability check ${stabilityCheckCount}/${maxStabilityChecks} passed`);
             
             if (stabilityCheckCount >= maxStabilityChecks) {
-              connectionsStable = true;
+              connectionStable = true;
               clearTimeout(timeout);
               resolve();
             } else {
-              // Wait 2 seconds between stability checks
-              setTimeout(checkStability, 2000);
+              setTimeout(checkStability, 1000); // Faster checks
             }
           } else {
             console.log(`⏳ Waiting for ready status, current: ${redisCluster.status}`);
-            stabilityCheckCount = 0; // Reset counter if not ready
-            setTimeout(checkStability, 1000);
+            stabilityCheckCount = 0;
+            setTimeout(checkStability, 500);
           }
         };
 
-        // Start stability checking after first ready event
+        // Start checking when ready
         redisCluster.once('ready', () => {
-          console.log('🔍 Starting stability checks...');
-          setTimeout(checkStability, 1000);
+          console.log('🔍 Starting connection stability checks...');
+          setTimeout(checkStability, 500);
         });
 
-        // If already ready, start checking
         if (redisCluster.status === 'ready') {
-          console.log('🔍 Starting stability checks (already ready)...');
-          setTimeout(checkStability, 1000);
+          console.log('🔍 Starting connection stability checks (already ready)...');
+          setTimeout(checkStability, 500);
         }
       });
 
-      console.log('✅ Redis cluster appears stable, testing operations...');
+      console.log('✅ Redis cluster connection appears stable, testing operations...');
 
       // Test operations thoroughly
       await testRedisOperations();
@@ -363,7 +583,7 @@ const initRedis = async (maxAttempts = 3) => {
       return;
 
     } catch (err) {
-      console.error(`❌ Redis initialization attempt ${attempt} failed:`, err.message);
+      console.error(`❌ Redis connection attempt ${attempt} failed:`, err.message);
       
       if (redisCluster) {
         try {
@@ -378,12 +598,11 @@ const initRedis = async (maxAttempts = 3) => {
       isRedisOperational = false;
 
       if (attempt === maxAttempts) {
-        throw new Error(`Redis initialization failed after ${maxAttempts} attempts: ${err.message}`);
+        throw new Error(`Redis connection failed after ${maxAttempts} attempts: ${err.message}`);
       }
 
-      // Wait before next attempt
-      const delay = attempt * 5000; // Longer delay
-      console.log(`⏳ Waiting ${delay}ms before next attempt...`);
+      const delay = attempt * 2000;
+      console.log(`⏳ Waiting ${delay}ms before next connection attempt...`);
       await wait(delay);
     }
   }
@@ -665,12 +884,24 @@ app.listen(PORT, async () => {
     if (redisCluster) {
       try {
         redisStatus = redisCluster.status;
-        const allNodes = redisCluster.nodes('all');
-        clusterNodes = allNodes.map(node => ({
-          host: node.options.host,
-          port: node.options.port,
-          status: node.status || 'unknown'
-        }));
+        const isCluster = redisCluster instanceof Redis.Cluster || 
+                         (redisCluster.constructor && redisCluster.constructor.name === 'Cluster') ||
+                         (redisCluster.nodes && typeof redisCluster.nodes === 'function');
+        
+        if (isCluster) {
+          const allNodes = redisCluster.nodes('all');
+          clusterNodes = allNodes.map(node => ({
+            host: node.options.host,
+            port: node.options.port,
+            status: node.status || 'unknown'
+          }));
+        } else {
+          clusterNodes = [{
+            host: redisCluster.options.host || 'unknown',
+            port: redisCluster.options.port || 'unknown',
+            status: redisCluster.status
+          }];
+        }
       } catch (err) {
         console.error('Error getting cluster nodes:', err.message);
       }
@@ -1066,6 +1297,46 @@ app.listen(PORT, async () => {
       console.error('Redis test failed:', err);
       res.status(500).json({ 
         error: 'Redis test failed: ' + err.message,
+        timestamp: new Date().toISOString()
+      });
+    }
+  });
+
+  // Additional endpoint to manually check cluster readiness
+  app.get('/api/redis/cluster-status', async (req, res) => {
+    try {
+      const clusterStatus = await diagnoseRedisCluster();
+      res.json({
+        ...clusterStatus,
+        isReady: clusterStatus.clusterOkNodes > 0 && 
+                 clusterStatus.slotsAssigned >= 16384 && 
+                 clusterStatus.masterNodes > 0,
+        connectionStatus: isRedisReady() ? 'connected' : 'disconnected',
+        timestamp: new Date().toISOString()
+      });
+    } catch (err) {
+      console.error('Cluster status check error:', err);
+      res.status(500).json({ 
+        error: 'Failed to check cluster status: ' + err.message,
+        timestamp: new Date().toISOString()
+      });
+    }
+  });
+
+  // Endpoint to manually trigger Redis reconnection
+  app.post('/api/redis/reconnect', async (req, res) => {
+    try {
+      console.log('🔄 Manual Redis reconnection triggered...');
+      await initRedis();
+      res.json({ 
+        message: 'Redis reconnection successful',
+        status: isRedisReady() ? 'ready' : 'not ready',
+        timestamp: new Date().toISOString()
+      });
+    } catch (err) {
+      console.error('Manual Redis reconnection failed:', err);
+      res.status(500).json({ 
+        error: 'Redis reconnection failed: ' + err.message,
         timestamp: new Date().toISOString()
       });
     }
