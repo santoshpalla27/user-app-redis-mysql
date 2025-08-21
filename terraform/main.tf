@@ -63,7 +63,7 @@ resource "aws_launch_template" "main-template" {
 #!/bin/bash
 set -xe
 yum install -y git ansible
-git clone -b ec2-deployment https://github.com/santoshpalla27/user-app-redis-mysql.git
+git clone -b ec2-deployment-aws-services https://github.com/santoshpalla27/user-app-redis-mysql.git
 cd user-app-redis-mysql/ansible
 ansible-playbook frontend.yml
 EOF
@@ -319,12 +319,47 @@ resource "aws_iam_role" "backend_ec2_role" {
   })
 }
 
-# Attach the EC2 Full Access policy to the IAM role
-resource "aws_iam_policy_attachment" "backend_ec2_full_access" {
-  name       = "backend-policy-attachment"
-  roles      = [aws_iam_role.backend_ec2_role.name]
-  policy_arn = "arn:aws:iam::aws:policy/AmazonEC2FullAccess"
+resource "aws_iam_policy" "elasticache_readonly" {
+  name        = "ElastiCacheReadOnly"
+  description = "Read-only access to ElastiCache clusters and endpoints"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = [
+          "elasticache:DescribeCacheClusters",
+          "elasticache:DescribeReplicationGroups",
+          "elasticache:ListTagsForResource",
+          "elasticache:DescribeCacheSubnetGroups"
+        ]
+        Effect   = "Allow"
+        Resource = "*"
+      }
+    ]
+  })
 }
+
+
+# Attach the EC2 Full Access policy to the IAM role
+resource "aws_iam_policy_attachment" "ec2_readonly" {
+  name       = "ec2-readonly-attachment"
+  roles      = [aws_iam_role.backend_ec2_role.name]
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEC2ReadOnlyAccess"
+}
+
+resource "aws_iam_policy_attachment" "rds_readonly" {
+  name       = "rds-readonly-attachment"
+  roles      = [aws_iam_role.backend_ec2_role.name]
+  policy_arn = "arn:aws:iam::aws:policy/AmazonRDSReadOnlyAccess"
+}
+
+resource "aws_iam_policy_attachment" "elasticache_readonly" {
+  name       = "elasticache-readonly-attachment"
+  roles      = [aws_iam_role.backend_ec2_role.name]
+  policy_arn = aws_iam_policy.elasticache_readonly.arn
+}
+
 
 # Create an IAM instance profile for the role
 resource "aws_iam_instance_profile" "backend-ec2_profile" {
@@ -346,7 +381,7 @@ resource "aws_launch_template" "backend-template" {
 #!/bin/bash
 set -xe
 yum install -y git ansible
-git clone -b ec2-deployment https://github.com/santoshpalla27/user-app-redis-mysql.git
+git clone -b ec2-deployment-aws-services https://github.com/santoshpalla27/user-app-redis-mysql.git
 cd user-app-redis-mysql/ansible
 ansible-playbook backend.yml
 EOF
@@ -483,7 +518,8 @@ resource "aws_autoscaling_group" "backend" {
   }
 
 
-  depends_on = [ aws_instance.redis , aws_instance.my-sql ]
+  # depends_on = [ module.rds , module.elasticache_redis ]
+  depends_on = [ aws_elasticache_replication_group.redis_rg , aws_db_instance.db ]
 }
 
 
@@ -552,148 +588,6 @@ resource "aws_cloudwatch_metric_alarm" "low_cpu_backend" {
 
 #=================================================================================================
 
-# Create an IAM role for EC2 with EC2 Full Access
-resource "aws_iam_role" "redis_ec2_role" {
-  name = var.iam_role_name
-
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Action = "sts:AssumeRole"
-        Effect = "Allow"
-        Principal = {
-          Service = "ec2.amazonaws.com"
-        }
-      }
-    ]
-  })
-}
-
-# Attach the EC2 Full Access policy to the IAM role
-resource "aws_iam_policy_attachment" "ec2_full_access" {
-  name       = "${var.iam_role_name}-policy-attachment"
-  roles      = [aws_iam_role.redis_ec2_role.name]
-  policy_arn = "arn:aws:iam::aws:policy/AmazonEC2FullAccess"
-}
-
-# Create an IAM instance profile for the role
-resource "aws_iam_instance_profile" "redis_ec2_profile" {
-  name = var.iam_role_name
-  role = aws_iam_role.redis_ec2_role.name
-}
-
-# Launch EC2 instances
-resource "aws_instance" "redis" {
-  count                  = var.instance_count
-  ami                    = var.ami_id
-  instance_type          = var.instance_type
-  subnet_id              = element(module.vpc.private_subnets, count.index % length(module.vpc.private_subnets))
-  key_name               = aws_key_pair.generated.key_name
-  # associate_public_ip_address = true  # Uncomment if you want a public IP and the instance is in a public subnet
-  vpc_security_group_ids = [aws_security_group.redis_sg.id]
-  iam_instance_profile   = aws_iam_instance_profile.redis_ec2_profile.name
-
-  user_data = <<-EOF
-                #!/bin/bash
-                exec > >(tee /var/log/user-data.log|logger -t user-data -s 2>/dev/console) 2>&1
-                set -xe
-                echo "User data script started at $(date)"
-                # Install Docker
-                sudo yum install -y docker
-                sudo systemctl start docker
-                sudo systemctl enable docker
-                sudo usermod -aG docker ec2-user
-                sudo yum install -y awscli
-
-                # Tune system parameters
-                echo 'net.core.rmem_max = 134217728' | sudo tee -a /etc/sysctl.conf
-                echo 'net.core.wmem_max = 134217728' | sudo tee -a /etc/sysctl.conf
-                echo 'net.ipv4.tcp_rmem = 4096 87380 134217728' | sudo tee -a /etc/sysctl.conf
-                echo 'net.ipv4.tcp_wmem = 4096 65536 134217728' | sudo tee -a /etc/sysctl.conf
-                echo 'net.core.netdev_max_backlog = 300000' | sudo tee -a /etc/sysctl.conf
-                echo 'net.core.somaxconn = 65535' | sudo tee -a /etc/sysctl.conf
-                echo 'vm.swappiness = 0' | sudo tee -a /etc/sysctl.conf
-                sudo sysctl -p
-
-                # Create directories for Redis data and logs
-                sudo mkdir -p /opt/redis{1,2,3}
-                sudo mkdir -p /var/log/redis{1,2,3}
-                sudo chmod -R 777 /opt/redis{1,2,3}
-                sudo chmod -R 777 /var/log/redis{1,2,3}
-
-                # Run Redis containers
-                sudo docker run -d --net=host --restart=unless-stopped --name redis1 \
-                    -v /opt/redis1:/opt/redis -v /var/log/redis1:/var/log/redis \
-                    ${var.docker_image} redis-server /usr/local/etc/redis/redis.conf \
-                    --port 6379 --requirepass ${var.redis_password}
-                
-                sudo docker run -d --net=host --restart=unless-stopped --name redis2 \
-                    -v /opt/redis2:/opt/redis -v /var/log/redis2:/var/log/redis \
-                    ${var.docker_image} redis-server /usr/local/etc/redis/redis.conf \
-                    --port 6380 --requirepass ${var.redis_password}
-                
-                sudo docker run -d --net=host --restart=unless-stopped --name redis3 \
-                    -v /opt/redis3:/opt/redis -v /var/log/redis3:/var/log/redis \
-                    ${var.docker_image} redis-server /usr/local/etc/redis/redis.conf \
-                    --port 6381 --requirepass ${var.redis_password}
-
-                # Wait for containers to stabilize
-                sleep 300
-
-                if [ ${count.index} -eq 3 ]; then
-                    # Fetch all instance IPs from the metadata
-                    INSTANCE_IPS=$(aws ec2 describe-instances \
-                        --region "${var.aws_region}" \
-                        --filters "Name=tag:Name,Values=redis-*" "Name=instance-state-name,Values=running" \
-                        --query "Reservations[*].Instances[*].PrivateIpAddress" \
-                        --output text)
-
-                    
-                    IP_PORTS=$(echo "$INSTANCE_IPS" | sed -E 's/([^ ]+)/\1:6379 \1:6380 \1:6381/g')
-                    echo "IP_PORTS: $IP_PORTS" >> /home/ec2-user/redis_setup.log
-
-                    # Create Redis Cluster
-                    yes "yes" | sudo docker run -i --net=host ${var.docker_image} redis-cli \
-                        -a "${var.redis_password}" --cluster create $IP_PORTS --cluster-replicas 3 \
-                        >> /home/ec2-user/redis_setup.log
-
-                    echo "Redis Cluster Creation Completed" >> /home/ec2-user/redis_setup.log
-                fi
-              EOF
-
-  tags = {
-    Name = "redis-${count.index + 1}"
-  }
-}
-
-
-
-
-resource "aws_instance" "my-sql" {
-  ami                         = var.ami_id
-  instance_type               = var.instance_type
-  subnet_id                   = module.vpc.private_subnets[0]
-  key_name                    = aws_key_pair.generated.key_name
-  vpc_security_group_ids      = [aws_security_group.my_sql_sg.id]
-  # associate_public_ip_address = true  # Uncomment if you want a public IP and the instance is in a public subnet
-
-  user_data = base64encode(<<-EOF
-#!/bin/bash
-set -xe
-yum install -y git ansible
-git clone -b ec2-deployment https://github.com/santoshpalla27/user-app-redis-mysql.git
-cd user-app-redis-mysql/ansible
-ansible-playbook mysql.yml
-EOF
-  )
-
-  tags = {
-    Name = "my-sql-instance"
-  }
-}
-
-
 
 
 resource "aws_instance" "check" {
@@ -702,7 +596,8 @@ resource "aws_instance" "check" {
   subnet_id                   = module.vpc.public_subnets[0]
   key_name                    = aws_key_pair.generated.key_name
   vpc_security_group_ids      = [aws_security_group.my_sql_sg.id]
-  associate_public_ip_address = true  # Uncomment if you want a public IP and the instance is in a public subnet
+  iam_instance_profile = aws_iam_instance_profile.backend-ec2_profile.name
+  associate_public_ip_address = true
   tags = {
     Name = "my-instance"
   }
