@@ -44,9 +44,6 @@ services:
       
     networks:
       - app-network
-    volumes:
-      - ./backend:/usr/src/app
-      - /usr/src/app/node_modules
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:5000/api/health"]
       interval: 30s

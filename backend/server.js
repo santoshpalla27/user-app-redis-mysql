@@ -205,9 +205,12 @@ const initRedis = async (maxAttempts = 3) => {
         enableOfflineQueue: true,
       };
 
-      // Add password if provided
-      if (redisPassword) {
+      // Add password if provided (skip if empty to avoid warning)
+      if (redisPassword && redisPassword.trim() !== '') {
         redisOptions.password = redisPassword;
+        console.log('🔐 Using Redis password authentication');
+      } else {
+        console.log('🔓 No Redis password provided - using passwordless connection');
       }
 
       // Add TLS configuration if enabled
@@ -430,8 +433,8 @@ async function executeRedisCommand(commandFn, maxRetries = 3) {
 }
 
 // Start server initialization
-app.listen(PORT, async () => {
-  console.log(`🚀 Server starting on port ${PORT}`);
+app.listen(PORT, '0.0.0.0', async () => {
+  console.log(`🚀 Server starting on port ${PORT} (binding to 0.0.0.0)`);
   console.log(`🗄️  RDS Endpoint: ${process.env.RDS_ENDPOINT || 'localhost'}`);
   console.log(`📊 Redis Cluster: ${redisClusterEndpoint}:${redisPort}`);
 
@@ -444,11 +447,66 @@ app.listen(PORT, async () => {
     console.log('⚠️  Server will continue without Redis functionality');
   }
 
-  // RDS MySQL connection with retry logic
+  // RDS MySQL connection with retry logic and database creation
   let mysqlConnected = false;
   let retries = 10;
   
   console.log('🔍 Testing RDS MySQL connection...');
+  
+  // First, try to connect without specifying a database to create it if needed
+  const mysqlPoolWithoutDb = mysql.createPool({
+    host: process.env.RDS_ENDPOINT || 'localhost',
+    user: process.env.RDS_MASTER_USERNAME || 'admin',
+    password: process.env.RDS_MASTER_PASSWORD || 'password',
+    port: process.env.RDS_PORT || 3306,
+    ssl: process.env.RDS_SSL === 'true' ? { rejectUnauthorized: false } : undefined,
+    waitForConnections: true,
+    connectionLimit: 10,
+    queueLimit: 0
+  });
+
+  // Try to create the database if it doesn't exist
+  try {
+    console.log('🔍 Checking if database exists...');
+    const conn = await mysqlPoolWithoutDb.getConnection();
+    
+    const databaseName = process.env.RDS_DATABASE || 'userdb';
+    
+    // Check if database exists
+    const [databases] = await conn.query('SHOW DATABASES LIKE ?', [databaseName]);
+    
+    if (databases.length === 0) {
+      console.log(`📦 Database '${databaseName}' does not exist. Creating...`);
+      await conn.query(`CREATE DATABASE IF NOT EXISTS \`${databaseName}\``);
+      console.log(`✅ Database '${databaseName}' created successfully`);
+    } else {
+      console.log(`✅ Database '${databaseName}' already exists`);
+    }
+    
+    // Create users table if it doesn't exist
+    await conn.query(`USE \`${databaseName}\``);
+    await conn.query(`
+      CREATE TABLE IF NOT EXISTS users (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        name VARCHAR(255) NOT NULL,
+        email VARCHAR(255) UNIQUE NOT NULL,
+        phone VARCHAR(20),
+        address TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+      )
+    `);
+    console.log('✅ Users table ready');
+    
+    conn.release();
+    await mysqlPoolWithoutDb.end();
+    
+  } catch (dbCreateErr) {
+    console.error('❌ Error setting up database:', dbCreateErr.message);
+    await mysqlPoolWithoutDb.end();
+  }
+  
+  // Now try to connect to the specific database
   while (!mysqlConnected && retries > 0) {
     try {
       const conn = await mysqlPool.getConnection();
