@@ -17,28 +17,24 @@ app.use(cors({
 }));
 app.use(express.json());
 
-// MySQL Connection Pool
+// MySQL Connection Pool with RDS configuration
 const mysqlPool = mysql.createPool({
-  host: process.env.MYSQL_HOST || 'mysql',
-  user: process.env.MYSQL_USER || 'user',
-  password: process.env.MYSQL_PASSWORD || 'password',
-  database: process.env.MYSQL_DATABASE || 'userdb',
+  host: process.env.RDS_ENDPOINT || 'localhost',
+  user: process.env.RDS_MASTER_USERNAME || 'admin',
+  password: process.env.RDS_MASTER_PASSWORD || 'password',
+  database: process.env.RDS_DATABASE || 'userdb',
+  port: process.env.RDS_PORT || 3306,
+  ssl: process.env.RDS_SSL === 'true' ? { rejectUnauthorized: false } : undefined,
   waitForConnections: true,
   connectionLimit: 10,
   queueLimit: 0
 });
 
-// Parse Redis nodes from environment - FIXED SYNTAX ERROR
-const redisNodes = (process.env.REDIS_NODES ||
-  'redis-node-0:6379,redis-node-1:6379,redis-node-2:6379,redis-node-3:6379,redis-node-4:6379,redis-node-5:6379')
-  .split(',')
-  .map(node => {
-    const [host, port] = node.split(':');
-    return { host, port: parseInt(port, 10) };
-  });
-
-// Redis password
-const redisPassword = process.env.REDIS_PASSWORD || 'bitnami123';
+// AWS ElastiCache Redis Cluster Configuration
+const redisClusterEndpoint = process.env.REDIS_CLUSTER_ENDPOINT || 'clustercfg.redis.anp3iz.use1.cache.amazonaws.com';
+const redisPort = parseInt(process.env.REDIS_PORT || '6379', 10);
+const redisPassword = process.env.REDIS_PASSWORD; // Optional for ElastiCache
+const redisUseTLS = process.env.REDIS_USE_TLS === 'true';
 
 // Redis clients
 let redisCluster = null;
@@ -173,281 +169,12 @@ async function testRedisOperations() {
   }
 }
 
-// Wait for cluster to be ready before connecting
-const waitForClusterReady = async (maxWaitTimeMs = 600000, checkIntervalMs = 5000) => {
-  console.log(`🔍 Waiting for Redis cluster to be ready (max wait: ${maxWaitTimeMs/1000}s)...`);
-  
-  const startTime = Date.now();
-  let attempt = 1;
-  
-  while (Date.now() - startTime < maxWaitTimeMs) {
-    console.log(`🔍 Cluster readiness check attempt ${attempt}...`);
-    
-    let allNodesReady = true;
-    let readyNodes = 0;
-    let totalNodes = redisNodes.length;
-    let totalSlotsAssigned = 0;
-    
-    // Check each node individually
-    for (let i = 0; i < redisNodes.length; i++) {
-      const node = redisNodes[i];
-      
-      try {
-        const singleNodeClient = new Redis({
-          host: node.host,
-          port: node.port,
-          password: redisPassword,
-          connectTimeout: 3000,
-          commandTimeout: 2000,
-          retryDelayOnFailover: 100,
-          maxRetriesPerRequest: 1,
-          lazyConnect: true,
-        });
-
-        await singleNodeClient.connect();
-        
-        // Check if node responds to ping
-        const pingResult = await singleNodeClient.ping();
-        if (pingResult !== 'PONG') {
-          console.log(`  ❌ Node ${node.host}:${node.port} - Ping failed`);
-          allNodesReady = false;
-          await singleNodeClient.disconnect();
-          continue;
-        }
-        
-        // Check cluster state
-        try {
-          const clusterInfo = await singleNodeClient.cluster('INFO');
-          if (clusterInfo.includes('cluster_state:ok')) {
-            console.log(`  ✅ Node ${node.host}:${node.port} - Cluster state: OK`);
-            readyNodes++;
-            
-            // Also check if all slots are assigned
-            const clusterNodes = await singleNodeClient.cluster('NODES');
-            const masterNodes = clusterNodes.split('\n').filter(line => 
-              line.includes('master') && !line.includes('fail')
-            );
-            
-            // Count slots for this check (only from first ready node to avoid double counting)
-            if (totalSlotsAssigned === 0) {
-              masterNodes.forEach(line => {
-                const slots = line.match(/(\d+-\d+|\d+)/g);
-                if (slots) {
-                  slots.forEach(slot => {
-                    if (slot.includes('-')) {
-                      const [start, end] = slot.split('-').map(Number);
-                      if (!isNaN(start) && !isNaN(end)) {
-                        totalSlotsAssigned += (end - start + 1);
-                      }
-                    } else if (!isNaN(parseInt(slot))) {
-                      totalSlotsAssigned += 1;
-                    }
-                  });
-                }
-              });
-              
-              console.log(`  📊 Node ${node.host}:${node.port} - Masters: ${masterNodes.length}, Slots assigned: ${totalSlotsAssigned}`);
-            }
-            
-          } else {
-            console.log(`  ⚠️  Node ${node.host}:${node.port} - Cluster state: NOT OK`);
-            allNodesReady = false;
-          }
-        } catch (clusterErr) {
-          console.log(`  ❌ Node ${node.host}:${node.port} - Cluster command failed: ${clusterErr.message}`);
-          allNodesReady = false;
-        }
-
-        await singleNodeClient.disconnect();
-        
-      } catch (err) {
-        console.log(`  ❌ Node ${node.host}:${node.port} - Connection failed: ${err.message}`);
-        allNodesReady = false;
-      }
-    }
-    
-    console.log(`📊 Cluster status: ${readyNodes}/${totalNodes} nodes ready, ${totalSlotsAssigned}/16384 slots assigned`);
-    
-    // Check if cluster is ready - allow for slight slot count variations due to counting method
-    if (allNodesReady && readyNodes > 0 && totalSlotsAssigned >= 16384) {
-      if (totalSlotsAssigned > 16384) {
-        console.log(`⚠️  Warning: More slots assigned than expected (${totalSlotsAssigned} > 16384), this might indicate duplicate counting or slot overlaps`);
-        console.log('✅ Cluster appears ready despite slot count anomaly');
-      } else {
-        console.log('🎉 Redis cluster is ready and all slots are assigned!');
-      }
-      return true;
-    }
-    
-    console.log(`⏳ Cluster not ready yet. Waiting ${checkIntervalMs/1000}s before next check...`);
-    await wait(checkIntervalMs);
-    attempt++;
-  }
-  
-  console.log(`❌ Timeout waiting for Redis cluster to be ready after ${maxWaitTimeMs/1000}s`);
-  return false;
-};
-
-// Enhanced diagnostic function with more detailed cluster info
-const diagnoseRedisCluster = async () => {
-  console.log('🔍 Diagnosing Redis cluster connectivity...');
-  
-  let clusterFormationStatus = {
-    totalNodes: redisNodes.length,
-    respondingNodes: 0,
-    clusterEnabledNodes: 0,
-    clusterOkNodes: 0,
-    masterNodes: 0,
-    slaveNodes: 0,
-    slotsAssigned: 0
-  };
-  
-  // Test each node individually
-  for (let i = 0; i < redisNodes.length; i++) {
-    const node = redisNodes[i];
-    console.log(`Testing node ${i + 1}/${redisNodes.length}: ${node.host}:${node.port}`);
-    
-    try {
-      const singleNodeClient = new Redis({
-        host: node.host,
-        port: node.port,
-        password: redisPassword,
-        connectTimeout: 5000,
-        commandTimeout: 3000,
-        retryDelayOnFailover: 100,
-        maxRetriesPerRequest: 1,
-        lazyConnect: true,
-      });
-
-      await singleNodeClient.connect();
-      const pingResult = await singleNodeClient.ping();
-      console.log(`  ✅ Node ${node.host}:${node.port} - Ping: ${pingResult}`);
-      clusterFormationStatus.respondingNodes++;
-      
-      // Try to get cluster info if available
-      try {
-        const clusterInfo = await singleNodeClient.cluster('INFO');
-        clusterFormationStatus.clusterEnabledNodes++;
-        
-        if (clusterInfo.includes('cluster_state:ok')) {
-          console.log(`  ✅ Node ${node.host}:${node.port} - Cluster state: OK`);
-          clusterFormationStatus.clusterOkNodes++;
-          
-          // Get detailed cluster nodes info (only from first OK node to avoid double counting)
-          if (clusterFormationStatus.slotsAssigned === 0) {
-            try {
-              const clusterNodes = await singleNodeClient.cluster('NODES');
-              const lines = clusterNodes.split('\n').filter(line => line.trim());
-              
-              lines.forEach(line => {
-                if (line.includes('master') && !line.includes('fail')) {
-                  clusterFormationStatus.masterNodes++;
-                  
-                  // Count slots assigned to this master
-                  const slots = line.match(/(\d+-\d+|\d+)/g);
-                  if (slots) {
-                    slots.forEach(slot => {
-                      if (slot.includes('-')) {
-                        const [start, end] = slot.split('-').map(Number);
-                        if (!isNaN(start) && !isNaN(end)) {
-                          clusterFormationStatus.slotsAssigned += (end - start + 1);
-                        }
-                      } else if (!isNaN(parseInt(slot))) {
-                        clusterFormationStatus.slotsAssigned += 1;
-                      }
-                    });
-                  }
-                } else if (line.includes('slave') && !line.includes('fail')) {
-                  clusterFormationStatus.slaveNodes++;
-                }
-              });
-              
-              console.log(`  📊 Node ${node.host}:${node.port} - Cluster nodes info retrieved`);
-              
-            } catch (nodesErr) {
-              console.log(`  ⚠️  Node ${node.host}:${node.port} - Could not get cluster nodes: ${nodesErr.message}`);
-            }
-          }
-          
-        } else {
-          console.log(`  ⚠️  Node ${node.host}:${node.port} - Cluster state: NOT OK`);
-          
-          // Try to get more details about why cluster is not OK
-          const lines = clusterInfo.split('\r\n');
-          for (const line of lines) {
-            if (line.includes('cluster_state') || line.includes('cluster_slots') || line.includes('cluster_known_nodes')) {
-              console.log(`    📋 ${line}`);
-            }
-          }
-        }
-      } catch (clusterErr) {
-        console.log(`  ℹ️  Node ${node.host}:${node.port} - Not in cluster mode or cluster command failed: ${clusterErr.message}`);
-      }
-
-      await singleNodeClient.disconnect();
-      
-    } catch (err) {
-      console.log(`  ❌ Node ${node.host}:${node.port} - Failed: ${err.message}`);
-    }
-  }
-  
-  // Summary
-  console.log('\n📊 Cluster Formation Summary:');
-  console.log(`  Total nodes: ${clusterFormationStatus.totalNodes}`);
-  console.log(`  Responding nodes: ${clusterFormationStatus.respondingNodes}`);
-  console.log(`  Cluster-enabled nodes: ${clusterFormationStatus.clusterEnabledNodes}`);
-  console.log(`  Nodes with OK cluster state: ${clusterFormationStatus.clusterOkNodes}`);
-  console.log(`  Master nodes: ${clusterFormationStatus.masterNodes}`);
-  console.log(`  Slave nodes: ${clusterFormationStatus.slaveNodes}`);
-  console.log(`  Slots assigned: ${clusterFormationStatus.slotsAssigned}/16384`);
-  
-  const isClusterReady = clusterFormationStatus.clusterOkNodes > 0 && 
-                        clusterFormationStatus.slotsAssigned === 16384 && 
-                        clusterFormationStatus.masterNodes > 0;
-                        
-  console.log(`  Cluster ready: ${isClusterReady ? '✅ YES' : '❌ NO'}`);
-  
-  if (!isClusterReady) {
-    console.log('\n💡 Cluster Formation Tips:');
-    if (clusterFormationStatus.respondingNodes < clusterFormationStatus.totalNodes) {
-      console.log('  - Some nodes are not responding. Check if all Redis containers are running.');
-    }
-    if (clusterFormationStatus.clusterEnabledNodes < clusterFormationStatus.respondingNodes) {
-      console.log('  - Some nodes are not cluster-enabled. Check Redis cluster configuration.');
-    }
-    if (clusterFormationStatus.clusterOkNodes === 0) {
-      console.log('  - No nodes report cluster state as OK. Cluster may still be forming.');
-      console.log('  - Run: redis-cli --cluster create <node1> <node2> ... --cluster-replicas 1');
-    }
-    if (clusterFormationStatus.slotsAssigned < 16384) {
-      console.log('  - Not all hash slots are assigned. Cluster formation incomplete.');
-    }
-  }
-  
-  return clusterFormationStatus;
-};
-
-// Modified initialization function that waits for cluster readiness
+// AWS ElastiCache Redis Cluster initialization
 const initRedis = async (maxAttempts = 3) => {
-  // First, diagnose the cluster
-  const clusterStatus = await diagnoseRedisCluster();
+  console.log('🚀 Initializing AWS ElastiCache Redis Cluster...');
+  console.log(`📍 Cluster endpoint: ${redisClusterEndpoint}:${redisPort}`);
+  console.log(`🔒 TLS enabled: ${redisUseTLS}`);
   
-  // Check if cluster is ready, if not wait for it
-  const isClusterReady = clusterStatus.clusterOkNodes > 0 && 
-                        clusterStatus.slotsAssigned >= 16384;
-  
-  if (!isClusterReady) {
-    console.log('🔄 Cluster is not ready yet, waiting for cluster formation...');
-    const clusterBecameReady = await waitForClusterReady();
-    
-    if (!clusterBecameReady) {
-      throw new Error('Redis cluster did not become ready within the timeout period');
-    }
-  } else {
-    console.log('✅ Cluster is already ready!');
-  }
-  
-  // Now proceed with connection attempts
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     console.log(`🚀 Redis cluster connection attempt ${attempt}/${maxAttempts}`);
     
@@ -464,31 +191,47 @@ const initRedis = async (maxAttempts = 3) => {
         isRedisOperational = false;
       }
 
-      console.log('Creating new Redis cluster connection...');
+      console.log('Creating new AWS ElastiCache Redis cluster connection...');
 
-      // Use more optimistic settings since we know cluster is ready
-      redisCluster = new Redis.Cluster(redisNodes, {
-        redisOptions: {
-          password: redisPassword,
-          connectTimeout: 10000,
-          commandTimeout: 8000,
-          retryDelayOnFailover: 1000,
-          maxRetriesPerRequest: 3,
-          lazyConnect: false,
-          keepAlive: 30000,
-          family: 4,
-          enableOfflineQueue: true, // Enable since cluster is ready
-        },
-        // Cluster-specific options
-        clusterRetryDelayOnFailover: 1000,
-        clusterRetryDelayOnClusterDown: 2000,
-        clusterMaxRedirections: 16,
-        slotsRefreshTimeout: 10000,
-        slotsRefreshInterval: 30000,
-        enableReadyCheck: true,
+      // Build Redis options
+      const redisOptions = {
+        connectTimeout: 10000,
+        commandTimeout: 8000,
+        retryDelayOnFailover: 1000,
         maxRetriesPerRequest: 3,
-        scaleReads: 'master',
-      });
+        lazyConnect: false,
+        keepAlive: 30000,
+        family: 4,
+        enableOfflineQueue: true,
+      };
+
+      // Add password if provided
+      if (redisPassword) {
+        redisOptions.password = redisPassword;
+      }
+
+      // Add TLS configuration if enabled
+      if (redisUseTLS) {
+        redisOptions.tls = {};
+      }
+
+      // Create cluster connection with AWS-specific configuration
+      redisCluster = new Redis.Cluster(
+        [{ host: redisClusterEndpoint, port: redisPort }],
+        {
+          dnsLookup: (address, callback) => callback(null, address),
+          redisOptions: redisOptions,
+          // Cluster-specific options
+          clusterRetryDelayOnFailover: 1000,
+          clusterRetryDelayOnClusterDown: 2000,
+          clusterMaxRedirections: 16,
+          slotsRefreshTimeout: 10000,
+          slotsRefreshInterval: 30000,
+          enableReadyCheck: true,
+          maxRetriesPerRequest: 3,
+          scaleReads: 'master',
+        }
+      );
 
       let readyPromiseResolve, readyPromiseReject;
       let connectionStable = false;
@@ -536,11 +279,11 @@ const initRedis = async (maxAttempts = 3) => {
         readyPromiseReject = reject;
         
         const timeout = setTimeout(() => {
-          reject(new Error('Redis cluster connection timeout after 20 seconds'));
-        }, 20000);
+          reject(new Error('Redis cluster connection timeout after 30 seconds'));
+        }, 30000);
 
         let stabilityCheckCount = 0;
-        const maxStabilityChecks = 2; // Reduced since cluster is already ready
+        const maxStabilityChecks = 3;
         
         const checkStability = () => {
           if (redisCluster.status === 'ready') {
@@ -552,24 +295,24 @@ const initRedis = async (maxAttempts = 3) => {
               clearTimeout(timeout);
               resolve();
             } else {
-              setTimeout(checkStability, 1000); // Faster checks
+              setTimeout(checkStability, 2000);
             }
           } else {
             console.log(`⏳ Waiting for ready status, current: ${redisCluster.status}`);
             stabilityCheckCount = 0;
-            setTimeout(checkStability, 500);
+            setTimeout(checkStability, 1000);
           }
         };
 
         // Start checking when ready
         redisCluster.once('ready', () => {
           console.log('🔍 Starting connection stability checks...');
-          setTimeout(checkStability, 500);
+          setTimeout(checkStability, 1000);
         });
 
         if (redisCluster.status === 'ready') {
           console.log('🔍 Starting connection stability checks (already ready)...');
-          setTimeout(checkStability, 500);
+          setTimeout(checkStability, 1000);
         }
       });
 
@@ -579,7 +322,7 @@ const initRedis = async (maxAttempts = 3) => {
       await testRedisOperations();
       
       isRedisOperational = true;
-      console.log('🎉 Redis cluster initialization completed successfully');
+      console.log('🎉 AWS ElastiCache Redis cluster initialization completed successfully');
       return;
 
     } catch (err) {
@@ -598,17 +341,17 @@ const initRedis = async (maxAttempts = 3) => {
       isRedisOperational = false;
 
       if (attempt === maxAttempts) {
-        throw new Error(`Redis connection failed after ${maxAttempts} attempts: ${err.message}`);
+        throw new Error(`AWS ElastiCache Redis connection failed after ${maxAttempts} attempts: ${err.message}`);
       }
 
-      const delay = attempt * 2000;
+      const delay = attempt * 3000;
       console.log(`⏳ Waiting ${delay}ms before next connection attempt...`);
       await wait(delay);
     }
   }
 };
 
-// Improved helper: scan keys across cluster or single node
+// Improved helper: scan keys across cluster
 async function getAllKeysFromCluster(pattern) {
   if (!isRedisReady()) {
     console.log('Redis not ready, returning empty array');
@@ -618,55 +361,32 @@ async function getAllKeysFromCluster(pattern) {
   try {
     const allKeys = new Set();
     
-    // Check if it's cluster mode - more reliable detection
-    const isCluster = redisCluster instanceof Redis.Cluster || 
-                     (redisCluster.constructor && redisCluster.constructor.name === 'Cluster') ||
-                     (redisCluster.nodes && typeof redisCluster.nodes === 'function');
-    
-    if (isCluster) {
-      // Cluster mode - scan all masters
-      const masters = redisCluster.nodes('master');
-      console.log(`Scanning ${masters.length} master nodes for pattern: ${pattern}`);
+    // Get all master nodes from the cluster
+    const masters = redisCluster.nodes('master');
+    console.log(`Scanning ${masters.length} master nodes for pattern: ${pattern}`);
 
-      for (const master of masters) {
-        if (master.status !== 'ready') {
-          console.log(`Skipping master ${master.options.host}:${master.options.port} - not ready`);
-          continue;
-        }
-
-        try {
-          let cursor = '0';
-          let scannedKeys = 0;
-          
-          do {
-            const result = await master.scan(cursor, 'MATCH', pattern, 'COUNT', 100);
-            cursor = result[0];
-            const keys = result[1];
-            keys.forEach(key => allKeys.add(key));
-            scannedKeys += keys.length;
-          } while (cursor !== '0');
-          
-          console.log(`Scanned ${scannedKeys} keys from master ${master.options.host}:${master.options.port}`);
-        } catch (err) {
-          console.error(`Error scanning keys from master ${master.options.host}:${master.options.port}:`, err.message);
-        }
+    for (const master of masters) {
+      if (master.status !== 'ready') {
+        console.log(`Skipping master ${master.options.host}:${master.options.port} - not ready`);
+        continue;
       }
-    } else {
-      // Single node mode - scan directly
-      console.log(`Scanning single Redis node for pattern: ${pattern}`);
-      
-      let cursor = '0';
-      let scannedKeys = 0;
-      
-      do {
-        const result = await redisCluster.scan(cursor, 'MATCH', pattern, 'COUNT', 100);
-        cursor = result[0];
-        const keys = result[1];
-        keys.forEach(key => allKeys.add(key));
-        scannedKeys += keys.length;
-      } while (cursor !== '0');
-      
-      console.log(`Scanned ${scannedKeys} keys from single node`);
+
+      try {
+        let cursor = '0';
+        let scannedKeys = 0;
+        
+        do {
+          const result = await master.scan(cursor, 'MATCH', pattern, 'COUNT', 100);
+          cursor = result[0];
+          const keys = result[1];
+          keys.forEach(key => allKeys.add(key));
+          scannedKeys += keys.length;
+        } while (cursor !== '0');
+        
+        console.log(`Scanned ${scannedKeys} keys from master ${master.options.host}:${master.options.port}`);
+      } catch (err) {
+        console.error(`Error scanning keys from master ${master.options.host}:${master.options.port}:`, err.message);
+      }
     }
 
     console.log(`Total unique keys found: ${allKeys.size}`);
@@ -709,130 +429,39 @@ async function executeRedisCommand(commandFn, maxRetries = 3) {
   }
 }
 
-// Fallback: Try single Redis connection if cluster fails
-const initRedisFallback = async () => {
-  console.log('🔄 Attempting Redis fallback to single node connection...');
-  
-  // Try the first node as a single Redis instance
-  const firstNode = redisNodes[0];
-  
-  try {
-    redisCluster = new Redis({
-      host: firstNode.host,
-      port: firstNode.port,
-      password: redisPassword,
-      connectTimeout: 10000,
-      commandTimeout: 8000,
-      retryDelayOnFailover: 500,
-      maxRetriesPerRequest: 3,
-      lazyConnect: false,
-      keepAlive: 30000,
-      family: 4,
-    });
-
-    // Set up basic event handlers
-    redisCluster.on('error', (err) => {
-      console.error('❌ Redis Single Node Error:', err.message);
-      isRedisOperational = false;
-    });
-
-    redisCluster.on('connect', () => {
-      console.log('🔗 Redis single node connected');
-    });
-
-    redisCluster.on('ready', () => {
-      console.log('✅ Redis single node ready');
-    });
-
-    // Wait for connection
-    await new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        reject(new Error('Redis single node connection timeout'));
-      }, 15000);
-
-      if (redisCluster.status === 'ready') {
-        clearTimeout(timeout);
-        resolve();
-        return;
-      }
-
-      redisCluster.once('ready', () => {
-        clearTimeout(timeout);
-        resolve();
-      });
-
-      redisCluster.once('error', (err) => {
-        clearTimeout(timeout);
-        reject(err);
-      });
-    });
-
-    // Test basic operations
-    console.log('🔍 Testing Redis single node operations...');
-    await redisCluster.ping();
-    console.log('✅ Single node ping successful');
-
-    // Simple set/get test
-    const testKey = 'test:fallback:' + Date.now();
-    await redisCluster.set(testKey, 'fallback-test', 'EX', 30);
-    const result = await redisCluster.get(testKey);
-    if (result !== 'fallback-test') {
-      throw new Error('Single node test failed');
-    }
-    await redisCluster.del(testKey);
-    
-    isRedisOperational = true;
-    console.log('✅ Redis fallback to single node successful');
-    return true;
-    
-  } catch (err) {
-    console.error('❌ Redis single node fallback failed:', err.message);
-    if (redisCluster) {
-      try {
-        await redisCluster.disconnect();
-      } catch (disconnectErr) {
-        // Ignore
-      }
-      redisCluster = null;
-    }
-    isRedisOperational = false;
-    return false;
-  }
-};
-
 // Start server initialization
 app.listen(PORT, async () => {
   console.log(`🚀 Server starting on port ${PORT}`);
+  console.log(`🗄️  RDS Endpoint: ${process.env.RDS_ENDPOINT || 'localhost'}`);
+  console.log(`📊 Redis Cluster: ${redisClusterEndpoint}:${redisPort}`);
 
   // Initialize Redis first
   try {
     await initRedis();
-    console.log('✅ Redis cluster initialization successful');
+    console.log('✅ AWS ElastiCache Redis cluster initialization successful');
   } catch (err) {
-    console.error('❌ Redis cluster initialization failed:', err.message);
-    
-    // Try fallback to single node
-    console.log('🔄 Attempting Redis fallback...');
-    const fallbackSuccess = await initRedisFallback();
-    
-    if (!fallbackSuccess) {
-      console.log('⚠️  Server will continue without Redis functionality');
-    }
+    console.error('❌ AWS ElastiCache Redis cluster initialization failed:', err.message);
+    console.log('⚠️  Server will continue without Redis functionality');
   }
 
-  // MySQL connection with retry logic
+  // RDS MySQL connection with retry logic
   let mysqlConnected = false;
   let retries = 10;
   
-  console.log('🔍 Testing MySQL connection...');
+  console.log('🔍 Testing RDS MySQL connection...');
   while (!mysqlConnected && retries > 0) {
     try {
       const conn = await mysqlPool.getConnection();
-      console.log('✅ Connected to MySQL database!');
+      console.log('✅ Connected to RDS MySQL database!');
+      
+      // Test the connection with a simple query
+      const [result] = await conn.query('SELECT 1 as test');
+      console.log('✅ RDS MySQL connection test successful:', result);
+      
       conn.release();
       mysqlConnected = true;
     } catch (err) {
-      console.error(`❌ MySQL connection error (${retries} retries left):`, err.message);
+      console.error(`❌ RDS MySQL connection error (${retries} retries left):`, err.message);
       retries--;
       if (retries > 0) {
         await wait(5000);
@@ -841,11 +470,11 @@ app.listen(PORT, async () => {
   }
 
   if (!mysqlConnected) {
-    console.error('❌ Failed to connect to MySQL after all retries');
+    console.error('❌ Failed to connect to RDS MySQL after all retries');
   }
 
   console.log('🎉 Server initialization completed');
-  console.log(`📊 Status: MySQL=${mysqlConnected ? 'connected' : 'disconnected'}, Redis=${isRedisReady() ? 'ready' : 'not ready'}`);
+  console.log(`📊 Status: RDS MySQL=${mysqlConnected ? 'connected' : 'disconnected'}, AWS ElastiCache Redis=${isRedisReady() ? 'ready' : 'not ready'}`);
 
   // Add a simple test endpoint to check what mode Redis is in
   app.get('/api/redis-mode', (req, res) => {
@@ -853,25 +482,20 @@ app.listen(PORT, async () => {
       return res.json({ mode: 'disconnected', status: 'Redis not available' });
     }
 
-    // Check if it's cluster mode or single node - more reliable detection
-    const isCluster = redisCluster instanceof Redis.Cluster || 
-                     (redisCluster.constructor && redisCluster.constructor.name === 'Cluster') ||
-                     (redisCluster.nodes && typeof redisCluster.nodes === 'function');
+    const nodes = redisCluster.nodes('all').map(node => ({
+      host: node.options.host,
+      port: node.options.port,
+      status: node.status
+    }));
     
     res.json({
-      mode: isCluster ? 'cluster' : 'single',
+      mode: 'aws-elasticache-cluster',
       status: redisCluster.status,
       operational: isRedisOperational,
-      constructor: redisCluster.constructor.name,
-      nodes: isCluster ? redisCluster.nodes('all').map(node => ({
-        host: node.options.host,
-        port: node.options.port,
-        status: node.status
-      })) : [{
-        host: redisCluster.options.host || 'unknown',
-        port: redisCluster.options.port || 'unknown',
-        status: redisCluster.status
-      }]
+      endpoint: redisClusterEndpoint,
+      port: redisPort,
+      tls: redisUseTLS,
+      nodes: nodes
     });
   });
 
@@ -884,24 +508,12 @@ app.listen(PORT, async () => {
     if (redisCluster) {
       try {
         redisStatus = redisCluster.status;
-        const isCluster = redisCluster instanceof Redis.Cluster || 
-                         (redisCluster.constructor && redisCluster.constructor.name === 'Cluster') ||
-                         (redisCluster.nodes && typeof redisCluster.nodes === 'function');
-        
-        if (isCluster) {
-          const allNodes = redisCluster.nodes('all');
-          clusterNodes = allNodes.map(node => ({
-            host: node.options.host,
-            port: node.options.port,
-            status: node.status || 'unknown'
-          }));
-        } else {
-          clusterNodes = [{
-            host: redisCluster.options.host || 'unknown',
-            port: redisCluster.options.port || 'unknown',
-            status: redisCluster.status
-          }];
-        }
+        const allNodes = redisCluster.nodes('all');
+        clusterNodes = allNodes.map(node => ({
+          host: node.options.host,
+          port: node.options.port,
+          status: node.status || 'unknown'
+        }));
       } catch (err) {
         console.error('Error getting cluster nodes:', err.message);
       }
@@ -922,21 +534,22 @@ app.listen(PORT, async () => {
     res.json({
       status: 'healthy',
       timestamp: new Date().toISOString(),
-      mysql: mysqlConnected ? 'connected' : 'disconnected',
-      redis_cluster: redisOperational ? 'operational' : redisStatus,
+      rds_mysql: mysqlConnected ? 'connected' : 'disconnected',
+      aws_elasticache_redis: redisOperational ? 'operational' : redisStatus,
+      redis_cluster_endpoint: redisClusterEndpoint,
       redis_nodes: clusterNodes,
       uptime: process.uptime()
     });
   });
 
-  // MySQL CRUD APIs (unchanged)
+  // MySQL CRUD APIs (updated for RDS)
 
   app.get('/api/mysql/users', async (req, res) => {
     try {
       const [rows] = await mysqlPool.query('SELECT * FROM users');
       res.json(rows);
     } catch (err) {
-      console.error('MySQL users fetch error:', err);
+      console.error('RDS MySQL users fetch error:', err);
       res.status(500).json({ error: 'Database error' });
     }
   });
@@ -947,7 +560,7 @@ app.listen(PORT, async () => {
       if (rows.length === 0) return res.status(404).json({ error: 'User not found' });
       res.json(rows[0]);
     } catch (err) {
-      console.error('MySQL user fetch error:', err);
+      console.error('RDS MySQL user fetch error:', err);
       res.status(500).json({ error: 'Database error' });
     }
   });
@@ -963,7 +576,7 @@ app.listen(PORT, async () => {
       );
       res.status(201).json({ id: result.insertId, name, email, phone, address });
     } catch (err) {
-      console.error('MySQL create user error:', err);
+      console.error('RDS MySQL create user error:', err);
       if (err.code === 'ER_DUP_ENTRY') return res.status(409).json({ error: 'Email already exists' });
       res.status(500).json({ error: 'Database error' });
     }
@@ -982,7 +595,7 @@ app.listen(PORT, async () => {
       if (result.affectedRows === 0) return res.status(404).json({ error: 'User not found' });
       res.json({ id: userId, name, email, phone, address });
     } catch (err) {
-      console.error('MySQL update user error:', err);
+      console.error('RDS MySQL update user error:', err);
       if (err.code === 'ER_DUP_ENTRY') return res.status(409).json({ error: 'Email already exists' });
       res.status(500).json({ error: 'Database error' });
     }
@@ -994,19 +607,18 @@ app.listen(PORT, async () => {
       if (result.affectedRows === 0) return res.status(404).json({ error: 'User not found' });
       res.json({ message: 'User deleted successfully' });
     } catch (err) {
-      console.error('MySQL delete user error:', err);
+      console.error('RDS MySQL delete user error:', err);
       res.status(500).json({ error: 'Database error' });
     }
   });
 
-  // Redis CRUD APIs
+  // Redis CRUD APIs (updated for AWS ElastiCache)
 
   app.get('/api/redis/users', async (req, res) => {
-    if (!isRedisReady()) return res.status(503).json({ error: 'Redis not ready' });
+    if (!isRedisReady()) return res.status(503).json({ error: 'AWS ElastiCache Redis not ready' });
 
     try {
-      console.log('🔍 [DEBUG] Getting all Redis users...');
-      console.log('🔍 [DEBUG] Redis cluster type:', redisCluster.constructor.name);
+      console.log('🔍 [DEBUG] Getting all Redis users from AWS ElastiCache...');
       console.log('🔍 [DEBUG] Redis cluster status:', redisCluster.status);
       
       const keys = await getAllKeysFromCluster('user:*');
@@ -1030,26 +642,26 @@ app.listen(PORT, async () => {
       console.log('🔍 [DEBUG] Final users array:', users);
       res.json(users);
     } catch (err) {
-      console.error('Redis fetch users error:', err);
+      console.error('AWS ElastiCache Redis fetch users error:', err);
       res.status(500).json({ error: 'Redis error: ' + err.message });
     }
   });
 
   app.get('/api/redis/users/:id', async (req, res) => {
-    if (!isRedisReady()) return res.status(503).json({ error: 'Redis not ready' });
+    if (!isRedisReady()) return res.status(503).json({ error: 'AWS ElastiCache Redis not ready' });
 
     try {
       const userData = await executeRedisCommand(client => client.hgetall(`user:${req.params.id}`));
       if (Object.keys(userData).length === 0) return res.status(404).json({ error: 'User not found' });
       res.json({ id: req.params.id, ...userData });
     } catch (err) {
-      console.error('Redis get user error:', err);
+      console.error('AWS ElastiCache Redis get user error:', err);
       res.status(500).json({ error: 'Redis error: ' + err.message });
     }
   });
 
   app.post('/api/redis/users', async (req, res) => {
-    if (!isRedisReady()) return res.status(503).json({ error: 'Redis not ready' });
+    if (!isRedisReady()) return res.status(503).json({ error: 'AWS ElastiCache Redis not ready' });
 
     const { name, email, phone, address } = req.body;
     if (!name || !email) return res.status(400).json({ error: 'Name and email required' });
@@ -1080,13 +692,13 @@ app.listen(PORT, async () => {
       await executeRedisCommand(client => client.hset(`user:${id}`, userData));
       res.status(201).json({ id, ...userData });
     } catch (err) {
-      console.error('Redis create user error:', err);
+      console.error('AWS ElastiCache Redis create user error:', err);
       res.status(500).json({ error: 'Redis error: ' + err.message });
     }
   });
 
   app.put('/api/redis/users/:id', async (req, res) => {
-    if (!isRedisReady()) return res.status(503).json({ error: 'Redis not ready' });
+    if (!isRedisReady()) return res.status(503).json({ error: 'AWS ElastiCache Redis not ready' });
 
     const { name, email, phone, address } = req.body;
     const userId = req.params.id;
@@ -1115,13 +727,13 @@ app.listen(PORT, async () => {
       await executeRedisCommand(client => client.hset(`user:${userId}`, userData));
       res.json({ id: userId, ...userData });
     } catch (err) {
-      console.error('Redis update user error:', err);
+      console.error('AWS ElastiCache Redis update user error:', err);
       res.status(500).json({ error: 'Redis error: ' + err.message });
     }
   });
 
   app.delete('/api/redis/users/:id', async (req, res) => {
-    if (!isRedisReady()) return res.status(503).json({ error: 'Redis not ready' });
+    if (!isRedisReady()) return res.status(503).json({ error: 'AWS ElastiCache Redis not ready' });
 
     try {
       const exists = await executeRedisCommand(client => client.exists(`user:${req.params.id}`));
@@ -1130,14 +742,14 @@ app.listen(PORT, async () => {
       await executeRedisCommand(client => client.del(`user:${req.params.id}`));
       res.json({ message: 'User deleted successfully' });
     } catch (err) {
-      console.error('Redis delete user error:', err);
+      console.error('AWS ElastiCache Redis delete user error:', err);
       res.status(500).json({ error: 'Redis error: ' + err.message });
     }
   });
 
-  // Copy MySQL -> Redis
+  // Copy RDS MySQL -> AWS ElastiCache Redis
   app.post('/api/mysql-to-redis', async (req, res) => {
-    if (!isRedisReady()) return res.status(503).json({ error: 'Redis not ready' });
+    if (!isRedisReady()) return res.status(503).json({ error: 'AWS ElastiCache Redis not ready' });
 
     try {
       const [rows] = await mysqlPool.query('SELECT * FROM users');
@@ -1156,24 +768,24 @@ app.listen(PORT, async () => {
           await executeRedisCommand(client => client.hset(`user:${user.id}`, userData));
           successCount++;
         } catch (err) {
-          console.error(`Error copying MySQL user ${user.id} to Redis:`, err.message);
+          console.error(`Error copying RDS MySQL user ${user.id} to AWS ElastiCache Redis:`, err.message);
         }
       }
 
       res.json({
-        message: `Copied ${successCount} users from MySQL to Redis`,
+        message: `Copied ${successCount} users from RDS MySQL to AWS ElastiCache Redis`,
         total: rows.length,
         success: successCount
       });
     } catch (err) {
-      console.error('MySQL to Redis copy error:', err);
+      console.error('RDS MySQL to AWS ElastiCache Redis copy error:', err);
       res.status(500).json({ error: 'Operation failed: ' + err.message });
     }
   });
 
-  // Copy Redis -> MySQL
+  // Copy AWS ElastiCache Redis -> RDS MySQL
   app.post('/api/redis-to-mysql', async (req, res) => {
-    if (!isRedisReady()) return res.status(503).json({ error: 'Redis not ready' });
+    if (!isRedisReady()) return res.status(503).json({ error: 'AWS ElastiCache Redis not ready' });
 
     try {
       const keys = await getAllKeysFromCluster('user:*');
@@ -1191,26 +803,26 @@ app.listen(PORT, async () => {
             copiedCount++;
           }
         } catch (err) {
-          console.error(`Error copying Redis user ${key} to MySQL:`, err.message);
+          console.error(`Error copying AWS ElastiCache Redis user ${key} to RDS MySQL:`, err.message);
           errorCount++;
         }
       }
 
       res.json({
-        message: `Copied ${copiedCount} users from Redis to MySQL`,
+        message: `Copied ${copiedCount} users from AWS ElastiCache Redis to RDS MySQL`,
         total: keys.length,
         success: copiedCount,
         errors: errorCount
       });
     } catch (err) {
-      console.error('Redis to MySQL copy error:', err);
+      console.error('AWS ElastiCache Redis to RDS MySQL copy error:', err);
       res.status(500).json({ error: 'Operation failed: ' + err.message });
     }
   });
 
-  // Cleanup duplicates in Redis
+  // Cleanup duplicates in AWS ElastiCache Redis
   app.post('/api/redis/cleanup-duplicates', async (req, res) => {
-    if (!isRedisReady()) return res.status(503).json({ error: 'Redis not ready' });
+    if (!isRedisReady()) return res.status(503).json({ error: 'AWS ElastiCache Redis not ready' });
 
     try {
       const keys = await getAllKeysFromCluster('user:*');
@@ -1232,7 +844,7 @@ app.listen(PORT, async () => {
             }
           }
         } catch (err) {
-          console.error(`Error fetching Redis user for key ${key}:`, err.message);
+          console.error(`Error fetching AWS ElastiCache Redis user for key ${key}:`, err.message);
         }
       }
 
@@ -1272,71 +884,136 @@ app.listen(PORT, async () => {
       }
 
       res.json({
-        message: 'Cleanup completed',
+        message: 'AWS ElastiCache Redis cleanup completed',
         duplicatesRemoved: cleanedCount,
         idsReassigned: reassignedCount,
         totalProcessed: keys.length
       });
     } catch (err) {
-      console.error('Cleanup duplicates error:', err);
+      console.error('AWS ElastiCache Redis cleanup duplicates error:', err);
       res.status(500).json({ error: 'Cleanup failed: ' + err.message });
     }
   });
 
-  // Test endpoint to validate Redis functionality
+  // Test endpoint to validate AWS ElastiCache Redis functionality
   app.post('/api/redis/test', async (req, res) => {
-    if (!isRedisReady()) return res.status(503).json({ error: 'Redis not ready' });
+    if (!isRedisReady()) return res.status(503).json({ error: 'AWS ElastiCache Redis not ready' });
 
     try {
       await testRedisOperations();
       res.json({ 
-        message: 'All Redis tests passed successfully',
+        message: 'All AWS ElastiCache Redis tests passed successfully',
+        cluster_endpoint: redisClusterEndpoint,
         timestamp: new Date().toISOString()
       });
     } catch (err) {
-      console.error('Redis test failed:', err);
+      console.error('AWS ElastiCache Redis test failed:', err);
       res.status(500).json({ 
-        error: 'Redis test failed: ' + err.message,
+        error: 'AWS ElastiCache Redis test failed: ' + err.message,
+        cluster_endpoint: redisClusterEndpoint,
         timestamp: new Date().toISOString()
       });
     }
   });
 
-  // Additional endpoint to manually check cluster readiness
+  // Additional endpoint to check AWS ElastiCache cluster status
   app.get('/api/redis/cluster-status', async (req, res) => {
     try {
-      const clusterStatus = await diagnoseRedisCluster();
+      if (!isRedisReady()) {
+        return res.json({
+          isReady: false,
+          connectionStatus: 'disconnected',
+          cluster_endpoint: redisClusterEndpoint,
+          timestamp: new Date().toISOString(),
+          error: 'Redis cluster not ready'
+        });
+      }
+
+      // Get cluster info
+      const clusterInfo = await redisCluster.cluster('INFO');
+      const clusterNodes = await redisCluster.cluster('NODES');
+      
+      // Parse cluster info
+      const infoLines = clusterInfo.split('\r\n');
+      const clusterState = infoLines.find(line => line.startsWith('cluster_state:'))?.split(':')[1];
+      const clusterSlots = infoLines.find(line => line.startsWith('cluster_slots_assigned:'))?.split(':')[1];
+      const clusterKnownNodes = infoLines.find(line => line.startsWith('cluster_known_nodes:'))?.split(':')[1];
+      
+      // Parse nodes info
+      const nodes = clusterNodes.split('\n').filter(line => line.trim()).map(line => {
+        const parts = line.split(' ');
+        return {
+          id: parts[0],
+          address: parts[1],
+          flags: parts[2],
+          master: parts[3],
+          ping_sent: parts[4],
+          pong_recv: parts[5],
+          config_epoch: parts[6],
+          link_state: parts[7],
+          slots: parts.slice(8).join(' ')
+        };
+      });
+
       res.json({
-        ...clusterStatus,
-        isReady: clusterStatus.clusterOkNodes > 0 && 
-                 clusterStatus.slotsAssigned >= 16384 && 
-                 clusterStatus.masterNodes > 0,
-        connectionStatus: isRedisReady() ? 'connected' : 'disconnected',
+        isReady: true,
+        connectionStatus: 'connected',
+        cluster_endpoint: redisClusterEndpoint,
+        cluster_state: clusterState,
+        slots_assigned: clusterSlots,
+        known_nodes: clusterKnownNodes,
+        nodes: nodes,
         timestamp: new Date().toISOString()
       });
     } catch (err) {
-      console.error('Cluster status check error:', err);
+      console.error('AWS ElastiCache cluster status check error:', err);
       res.status(500).json({ 
-        error: 'Failed to check cluster status: ' + err.message,
+        error: 'Failed to check AWS ElastiCache cluster status: ' + err.message,
+        cluster_endpoint: redisClusterEndpoint,
         timestamp: new Date().toISOString()
       });
     }
   });
 
-  // Endpoint to manually trigger Redis reconnection
+  // Endpoint to manually trigger AWS ElastiCache Redis reconnection
   app.post('/api/redis/reconnect', async (req, res) => {
     try {
-      console.log('🔄 Manual Redis reconnection triggered...');
+      console.log('🔄 Manual AWS ElastiCache Redis reconnection triggered...');
       await initRedis();
       res.json({ 
-        message: 'Redis reconnection successful',
+        message: 'AWS ElastiCache Redis reconnection successful',
         status: isRedisReady() ? 'ready' : 'not ready',
+        cluster_endpoint: redisClusterEndpoint,
         timestamp: new Date().toISOString()
       });
     } catch (err) {
-      console.error('Manual Redis reconnection failed:', err);
+      console.error('Manual AWS ElastiCache Redis reconnection failed:', err);
       res.status(500).json({ 
-        error: 'Redis reconnection failed: ' + err.message,
+        error: 'AWS ElastiCache Redis reconnection failed: ' + err.message,
+        cluster_endpoint: redisClusterEndpoint,
+        timestamp: new Date().toISOString()
+      });
+    }
+  });
+
+  // New endpoint to test RDS connection
+  app.get('/api/mysql/test', async (req, res) => {
+    try {
+      const conn = await mysqlPool.getConnection();
+      const [result] = await conn.query('SELECT VERSION() as version, NOW() as current_time');
+      conn.release();
+      
+      res.json({
+        message: 'RDS MySQL connection test successful',
+        database_info: result[0],
+        endpoint: process.env.RDS_ENDPOINT || 'localhost',
+        timestamp: new Date().toISOString()
+      });
+    } catch (err) {
+      console.error('RDS MySQL test failed:', err);
+      res.status(500).json({
+        error: 'RDS MySQL connection test failed: ' + err.message,
+        endpoint: process.env.RDS_ENDPOINT || 'localhost',
         timestamp: new Date().toISOString()
       });
     }
@@ -1350,11 +1027,11 @@ process.on('SIGINT', async () => {
     if (redisCluster) {
       redisCluster.removeAllListeners();
       await redisCluster.disconnect();
-      console.log('✅ Redis cluster disconnected');
+      console.log('✅ AWS ElastiCache Redis cluster disconnected');
     }
 
     await mysqlPool.end();
-    console.log('✅ MySQL pool closed');
+    console.log('✅ RDS MySQL pool closed');
 
     process.exit(0);
   } catch (err) {
