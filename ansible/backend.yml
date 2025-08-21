@@ -53,7 +53,7 @@
       amazon.aws.rds_instance_info:
         region: us-east-1
         filters:
-          db-instance-id: "database-1"   # adjust to your RDS identifier
+          db-instance-id: "mydb"   # adjust to your RDS identifier
       register: rds_info
 
     - name: Set RDS endpoint fact
@@ -62,15 +62,17 @@
       when: rds_info.instances | length > 0
 
     # --- Fetch AWS Redis cluster endpoint ---
-    - name: Get Redis clusters
-      amazon.aws.elasticache_info:
+    - name: Get Redis replication groups
+      amazon.aws.elasticache_replication_group_info:
         region: us-east-1
+        replication_group_id: "redis-oss-rg"   # replace with your replication group ID
       register: redis_info
 
     - name: Set Redis cluster endpoint fact
       set_fact:
-        redis_cluster_endpoint: "{{ redis_info.clusters[0].configuration_endpoint.address }}"
-      when: redis_info.clusters | length > 0
+        redis_cluster_endpoint: "{{ redis_info.replication_groups[0].configuration_endpoint.address }}"
+      when: redis_info.replication_groups | length > 0
+
 
     - name: Fail if endpoints not found
       fail:
