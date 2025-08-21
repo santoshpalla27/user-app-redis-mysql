@@ -1,6 +1,7 @@
 ---
 - name: Setup Backend Application with AWS RDS & ElastiCache Discovery
   hosts: localhost
+  connection: local
   become: yes
   vars:
     backend_container_name: "user-app-backend"
@@ -18,6 +19,12 @@
     redis_password: "password"
     redis_port: 6379
 
+    # AWS region
+    aws_region: "us-east-1"
+
+    # Optional: specify Redis cluster name/pattern (leave empty to find first available)
+    redis_cluster_name_pattern: "redis-oss-rg"  # Default to your cluster ID
+
   tasks:
     - name: Install required packages
       yum:
@@ -27,57 +34,48 @@
           - python3-setuptools
         state: present
 
-    - name: Start and enable Docker
+    - name: Try installing Docker Python library via yum first
+      yum:
+        name: python3-docker
+        state: present
+      ignore_errors: yes
+      register: yum_docker_install
+
+    - name: Install Docker Python library via pip (fallback)
+      pip:
+        name: 
+          - docker
+          - boto3
+          - botocore
+        executable: pip3
+        extra_args: --user
+      become: no
+      when: yum_docker_install is failed
+
+    - name: Install boto3, botocore via pip if yum docker worked
+      pip:
+        name:
+          - boto3
+          - botocore
+        executable: pip3
+        extra_args: --user
+      become: no
+      when: yum_docker_install is not failed
+
+    - name: Start and enable Docker service
       systemd:
         name: docker
         state: started
         enabled: yes
 
-    - name: Ensure boto3 & docker python libs installed
-      pip:
-        name:
-          - boto3
-          - botocore
-          - docker
-        executable: pip3
-        extra_args: --user --break-system-packages
-
-    - name: Add ec2-user to Docker group
+    - name: Add current user to docker group
       user:
-        name: ec2-user
+        name: "{{ ansible_user_id }}"
         groups: docker
         append: yes
 
-    # --- Fetch AWS RDS endpoint ---
-    - name: Get RDS instances
-      amazon.aws.rds_instance_info:
-        region: us-east-1
-        filters:
-          db-instance-id: "mydb"   # adjust to your RDS identifier
-      register: rds_info
-
-    - name: Set RDS endpoint fact
-      set_fact:
-        rds_endpoint: "{{ rds_info.instances[0].endpoint.address }}"
-      when: rds_info.instances | length > 0
-
-    # --- Fetch AWS Redis cluster endpoint ---
-    - name: Get Redis replication groups
-      amazon.aws.elasticache_replication_group_info:
-        region: us-east-1
-        replication_group_id: "redis-oss-rg"   # replace with your replication group ID
-      register: redis_info
-
-    - name: Set Redis cluster endpoint fact
-      set_fact:
-        redis_cluster_endpoint: "{{ redis_info.replication_groups[0].configuration_endpoint.address }}"
-      when: redis_info.replication_groups | length > 0
-
-
-    - name: Fail if endpoints not found
-      fail:
-        msg: "RDS or Redis endpoint not found!"
-      when: rds_endpoint is not defined or redis_cluster_endpoint is not defined
+    - name: Reset SSH connection to allow user changes to affect ansible user
+      meta: reset_connection
 
     - name: Stop existing backend container
       docker_container:
@@ -90,6 +88,244 @@
         name: "{{ backend_image }}"
         source: pull
         state: present
+
+    # Manual Redis endpoint override (highest priority)
+    - name: Set Redis endpoint manually
+      set_fact:
+        redis_endpoint: "{{ redis_endpoint_manual }}"
+      when: redis_endpoint_manual is defined
+
+    # --- Install required Ansible collections ---
+    - name: Check if community.aws collection is installed
+      ansible.builtin.command:
+        cmd: ansible-galaxy collection list community.aws
+      register: community_aws_check
+      ignore_errors: yes
+      delegate_to: localhost
+      run_once: true
+      become: no
+
+    - name: Install community.aws collection if not present
+      ansible.builtin.command:
+        cmd: ansible-galaxy collection install community.aws
+      when: community_aws_check.rc != 0
+      delegate_to: localhost
+      run_once: true
+      become: no
+
+    - name: Check if amazon.aws collection is installed
+      ansible.builtin.command:
+        cmd: ansible-galaxy collection list amazon.aws
+      register: amazon_aws_check
+      ignore_errors: yes
+      delegate_to: localhost
+      run_once: true
+      become: no
+
+    - name: Install amazon.aws collection if not present
+      ansible.builtin.command:
+        cmd: ansible-galaxy collection install amazon.aws
+      when: amazon_aws_check.rc != 0
+      delegate_to: localhost
+      run_once: true
+      become: no
+
+    # --- Enhanced AWS ElastiCache Redis Discovery ---
+    - name: Get ElastiCache Replication Groups via AWS CLI
+      ansible.builtin.command:
+        cmd: aws elasticache describe-replication-groups --region {{ aws_region }} --replication-group-id {{ redis_cluster_name_pattern }}
+      register: redis_cli_result
+      ignore_errors: yes
+      when: 
+        - redis_endpoint is not defined
+        - redis_cluster_name_pattern != ""
+
+    - name: Parse Redis CLI result
+      set_fact:
+        redis_info: "{{ redis_cli_result.stdout | from_json }}"
+      when: 
+        - redis_endpoint is not defined
+        - redis_cli_result is defined
+        - redis_cli_result.rc == 0
+
+    - name: Get ElastiCache Replication Groups via Ansible (fallback)
+      community.aws.elasticache_info:
+        region: "{{ aws_region }}"
+      register: elasticache_info
+      ignore_errors: yes
+      when: 
+        - redis_endpoint is not defined
+        - (redis_cli_result is not defined or redis_cli_result.rc != 0)
+
+    - name: Debug ElastiCache discovery results
+      debug:
+        msg: |
+          ElastiCache discovery method: {{ 'AWS CLI' if redis_info is defined else 'Ansible Module' }}
+          Looking for cluster: {{ redis_cluster_name_pattern if redis_cluster_name_pattern != '' else 'Any cluster' }}
+          {% if redis_info is defined %}
+          CLI Results:
+          Total replication groups found: {{ redis_info.ReplicationGroups | length }}
+          {% if redis_info.ReplicationGroups | length > 0 %}
+          Cluster Details:
+          {% for rg in redis_info.ReplicationGroups %}
+            - ID: {{ rg.ReplicationGroupId }}
+              Status: {{ rg.Status }}
+              Engine: {{ rg.CacheNodeType }}
+              Cluster Mode: {{ 'Enabled' if rg.ClusterEnabled | default(false) else 'Disabled' }}
+              Configuration Endpoint: {{ rg.ConfigurationEndpoint.Address if rg.ConfigurationEndpoint is defined else 'N/A' }}
+              Primary Endpoint: {{ rg.PrimaryEndpoint.Address if rg.PrimaryEndpoint is defined else 'N/A' }}
+              Transit Encryption: {{ rg.TransitEncryptionEnabled | default(false) }}
+              Auth Token Required: {{ rg.AuthTokenEnabled | default(false) }}
+          {% endfor %}
+          {% endif %}
+          {% elif elasticache_info is defined %}
+          Ansible Module Results:
+          ElastiCache API call successful: {{ not (elasticache_info.failed | default(false)) }}
+          Module response keys: {{ elasticache_info.keys() | list }}
+          {% endif %}
+      when: 
+        - redis_endpoint is not defined
+        - (redis_info is defined or elasticache_info is defined)
+
+    # Strategy 1: Extract from CLI result (preferred method)
+    - name: Set Redis endpoint from CLI result
+      set_fact:
+        redis_endpoint: "{{ item.ConfigurationEndpoint.Address if item.ConfigurationEndpoint is defined else item.PrimaryEndpoint.Address }}"
+        redis_cluster_mode: "{{ 'cluster' if item.ClusterEnabled | default(false) else 'standalone' }}"
+        redis_cluster_id: "{{ item.ReplicationGroupId }}"
+        redis_auth_required: "{{ item.AuthTokenEnabled | default(false) }}"
+        redis_tls_required: "{{ item.TransitEncryptionEnabled | default(false) }}"
+      when: 
+        - redis_endpoint is not defined
+        - redis_info is defined
+        - redis_info.ReplicationGroups is defined
+        - redis_info.ReplicationGroups | length > 0
+        - item.Status == "available"
+      loop: "{{ redis_info.ReplicationGroups }}"
+      loop_control:
+        label: "{{ item.ReplicationGroupId }}"
+
+    # Strategy 2: Look for Redis replication groups with primary endpoint (Ansible module fallback)
+    - name: Find suitable Redis replication group with primary endpoint
+      set_fact:
+        redis_endpoint: "{{ item.primary_endpoint.address }}"
+        redis_cluster_mode: "replication_group_primary"
+        redis_cluster_id: "{{ item.replication_group_id }}"
+      when: 
+        - redis_endpoint is not defined
+        - elasticache_info is defined
+        - not (elasticache_info.failed | default(false))
+        - elasticache_info.replication_groups is defined
+        - elasticache_info.replication_groups | length > 0
+        - item.status == "available"
+        - item.primary_endpoint is defined
+        - item.primary_endpoint.address is defined
+        - (redis_cluster_name_pattern == "" or item.replication_group_id == redis_cluster_name_pattern or item.replication_group_id is match(redis_cluster_name_pattern))
+      loop: "{{ elasticache_info.replication_groups }}"
+      loop_control:
+        label: "{{ item.replication_group_id }}"
+
+    # Strategy 3: Look for Redis replication groups with configuration endpoint (cluster mode)
+    - name: Find suitable Redis replication group with configuration endpoint
+      set_fact:
+        redis_endpoint: "{{ item.configuration_endpoint.address }}"
+        redis_cluster_mode: "replication_group_cluster"
+        redis_cluster_id: "{{ item.replication_group_id }}"
+      when: 
+        - redis_endpoint is not defined
+        - elasticache_info is defined
+        - not (elasticache_info.failed | default(false))
+        - elasticache_info.replication_groups is defined
+        - elasticache_info.replication_groups | length > 0
+        - item.status == "available"
+        - item.configuration_endpoint is defined
+        - item.configuration_endpoint.address is defined
+        - (redis_cluster_name_pattern == "" or item.replication_group_id == redis_cluster_name_pattern or item.replication_group_id is match(redis_cluster_name_pattern))
+      loop: "{{ elasticache_info.replication_groups }}"
+      loop_control:
+        label: "{{ item.replication_group_id }}"
+
+    # Strategy 4: Look for standalone Redis cache clusters
+    - name: Find suitable Redis cache cluster
+      set_fact:
+        redis_endpoint: "{{ item.cache_nodes[0].endpoint.address }}"
+        redis_cluster_mode: "cache_cluster"
+        redis_cluster_id: "{{ item.cache_cluster_id }}"
+      when: 
+        - redis_endpoint is not defined
+        - elasticache_info is defined
+        - not (elasticache_info.failed | default(false))
+        - elasticache_info.cache_clusters is defined
+        - elasticache_info.cache_clusters | length > 0
+        - item.cache_cluster_status == "available"
+        - item.engine == "redis"
+        - item.cache_nodes is defined
+        - item.cache_nodes | length > 0
+        - item.cache_nodes[0].endpoint is defined
+        - (redis_cluster_name_pattern == "" or item.cache_cluster_id == redis_cluster_name_pattern or item.cache_cluster_id is match(redis_cluster_name_pattern))
+      loop: "{{ elasticache_info.cache_clusters }}"
+      loop_control:
+        label: "{{ item.cache_cluster_id }}"
+
+    - name: Debug Redis endpoint discovery result
+      debug:
+        msg: |
+          Redis Endpoint Discovery Result:
+          {% if redis_endpoint is defined %}
+          ✅ SUCCESS!
+          Endpoint: {{ redis_endpoint }}
+          Port: {{ redis_port }}
+          Cluster Mode: {{ redis_cluster_mode }}
+          Cluster ID: {{ redis_cluster_id }}
+          TLS: {{ 'Enabled' if redis_use_tls | default(true) else 'Disabled' }}
+          {% else %}
+          ❌ FAILED!
+          No suitable Redis cluster found.
+          Check:
+          1. AWS credentials and permissions
+          2. ElastiCache clusters exist in region: {{ aws_region }}
+          3. Clusters are in 'available' status
+          4. Cluster name pattern: {{ redis_cluster_name_pattern if redis_cluster_name_pattern != "" else "Any cluster" }}
+          {% endif %}
+
+    # --- Fetch AWS RDS endpoint ---
+    - name: Get RDS instances
+      community.aws.rds_instance_info:
+        region: "{{ aws_region }}"
+        filters:
+          db-instance-id: "mydb"   # adjust to your RDS identifier
+      register: rds_info
+
+    - name: Set RDS endpoint fact
+      set_fact:
+        rds_endpoint: "{{ rds_info.instances[0].endpoint.address }}"
+      when: rds_info.instances | length > 0
+
+    - name: Debug RDS endpoint
+      debug:
+        msg: "RDS endpoint: {{ rds_endpoint | default('Not found') }}"
+
+    - name: Fail if RDS endpoint not found
+      fail:
+        msg: "RDS endpoint not found! Check if RDS instance 'mydb' exists in {{ aws_region }}"
+      when: rds_endpoint is not defined
+
+    - name: Warn if Redis endpoint not found
+      debug:
+        msg: |
+          ⚠️  WARNING: Redis endpoint not found!
+          The backend will start but Redis functionality may not work.
+          Consider:
+          1. Creating an ElastiCache Redis cluster
+          2. Providing manual endpoint with -e redis_endpoint_manual=your-endpoint
+          3. Checking AWS permissions and region
+      when: redis_endpoint is not defined
+
+    - name: Set Redis configuration variables
+      set_fact:
+        redis_use_tls: "{{ redis_tls_required | default(true) }}"
+        redis_cluster_endpoint: "{{ redis_endpoint | default('') }}"
+        redis_auth_token_required: "{{ redis_auth_required | default(false) }}"
 
     - name: Run backend container with AWS endpoints
       docker_container:
@@ -114,7 +350,7 @@
           # AWS Redis Configuration
           REDIS_CLUSTER_ENDPOINT: "{{ redis_cluster_endpoint }}"
           REDIS_PORT: "{{ redis_port | string }}"
-          REDIS_USE_TLS: "true"
+          REDIS_USE_TLS: "{{ redis_use_tls | string | lower }}"
           REDIS_PASSWORD: "{{ redis_password }}"
 
     - name: Wait for backend container to be healthy
@@ -132,8 +368,19 @@
     - name: Debug final status
       debug:
         msg: |
-          ✅ Backend is running!
-          Container: {{ backend_status.container.Id }}
+          ✅ Backend deployment complete!
+          Container ID: {{ backend_status.container.Id }}
           RDS Endpoint: {{ rds_endpoint }}
-          Redis Cluster Endpoint: {{ redis_cluster_endpoint }}
-          Access API: http://localhost:{{ backend_port }}/api/health
+          Redis Endpoint: {{ redis_endpoint | default('Not configured') }}
+          {% if redis_endpoint is defined %}
+          Redis Cluster ID: {{ redis_cluster_id }}
+          Redis Mode: {{ redis_cluster_mode }}
+          {% endif %}
+          
+          🌐 API Access: http://localhost:{{ backend_port }}/api/health
+          
+          Environment Variables Set:
+          - NODE_ENV={{ node_env }}
+          - RDS_ENDPOINT={{ rds_endpoint }}
+          - REDIS_CLUSTER_ENDPOINT={{ redis_cluster_endpoint }}
+          - REDIS_USE_TLS={{ redis_use_tls | string | lower }}
