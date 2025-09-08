@@ -47,14 +47,14 @@ redis-cluster:
     master:
       persistence:
         enabled: true
+        storageClass: "ebs-sc"
         size: 8Gi
-        storageClass: ebs-sc
 
-    replicas:
+    replica:
       persistence:
         enabled: true
+        storageClass: "ebs-sc"
         size: 8Gi
-        storageClass: ebs-sc
 
   auth:
     enabled: true
@@ -62,6 +62,7 @@ redis-cluster:
 
   metrics:
     enabled: true
+
 
 
 
@@ -110,15 +111,8 @@ mysql:
 
   # Startup probe configuration
   startupProbe:
-    enabled: true
-    exec:
-      command:
-        - sh
-        - -c
-        - mysqladmin ping -h 127.0.0.1 -P 3306 -u root -p"$MYSQL_ROOT_PASSWORD"
-    initialDelaySeconds: 60   # give more time for startup
-    periodSeconds: 10
-    failureThreshold: 60      # wait up to 10 minutes
+    enabled: false
+
 
 
   metrics:
