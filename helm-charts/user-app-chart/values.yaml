@@ -121,7 +121,7 @@ backend:
   enabled: true
   name: backend
   image:
-    repository: santoshpalla27/3-tier
+    repository: santoshpalla27/user-app
     tag: kubernetes-backend-v1
     pullPolicy: IfNotPresent
   
