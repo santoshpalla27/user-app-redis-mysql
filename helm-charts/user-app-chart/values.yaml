@@ -38,30 +38,27 @@ storageClass:
 #     enabled: false
 
 
-redis-cluster:
-  cluster:
-    enabled: true
-    masterCount: 3
-    replicaCount: 1
+cluster:
+  enabled: true
+  slaveCount: 1   # 1 slave per master
+  master:
+    persistence:
+      enabled: true
+      size: 8Gi
+      storageClass: ebs-sc
+  slave:
+    persistence:
+      enabled: true
+      size: 8Gi
+      storageClass: ebs-sc
 
-    master:
-      persistence:
-        enabled: true
-        storageClass: "ebs-sc"
-        size: 8Gi
+auth:
+  enabled: true
+  password: bitnami123
 
-    replica:
-      persistence:
-        enabled: true
-        storageClass: "ebs-sc"
-        size: 8Gi
+metrics:
+  enabled: true
 
-  auth:
-    enabled: true
-    password: "bitnami123"
-
-  metrics:
-    enabled: true
 
 
 
