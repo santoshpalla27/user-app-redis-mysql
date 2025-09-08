@@ -115,10 +115,11 @@ mysql:
       command:
         - sh
         - -c
-        - mysqladmin ping -h 127.0.0.1 -u root -p"$MYSQL_ROOT_PASSWORD"
-    failureThreshold: 30     # wait ~5 minutes
+        - mysqladmin ping -h 127.0.0.1 -P 3306 -u root -p"$MYSQL_ROOT_PASSWORD"
+    initialDelaySeconds: 60   # give more time for startup
     periodSeconds: 10
-    initialDelaySeconds: 30
+    failureThreshold: 60      # wait up to 10 minutes
+
 
   metrics:
     enabled: true
