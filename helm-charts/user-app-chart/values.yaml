@@ -122,7 +122,7 @@ backend:
   name: backend
   image:
     repository: santoshpalla27/3-tier
-    tag: backend-2
+    tag: kubernetes-backend-v1
     pullPolicy: IfNotPresent
   
   replicas: 3
@@ -217,7 +217,7 @@ frontend:
   name: frontend
   image:
     repository: santoshpalla27/user-app
-    tag: frontend-v1
+    tag: kubernetes-frontend-v1
     pullPolicy: Always
   
   replicas: 3
@@ -352,3 +352,30 @@ rbac:
 
 # Miscellaneous
 terminationGracePeriodSeconds: 5
+
+
+
+
+
+alb:
+  scheme: internet-facing
+  targetType: ip
+  listenPorts:
+    - HTTP: 80
+    - HTTPS: 443
+  certificateArn: arn:aws:acm:us-east-1:841740286449:certificate/4009d0e4-f2aa-49ee-ae43-cce3c63f95b5
+
+  healthcheck:
+    path: /health
+    port: 80
+    protocol: HTTP
+
+hosts:
+  - host: santosh.website
+    service:
+      name: frontend
+      port: 80
+  - host: backend.santosh.website
+    service:
+      name: backend
+      port: 5000

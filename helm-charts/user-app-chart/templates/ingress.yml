@@ -1,0 +1,28 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "my-app-ingress-chart.fullname" . }}
+  namespace: {{ .Values.global.namespace }}
+  annotations:
+    kubernetes.io/ingress.class: alb
+    alb.ingress.kubernetes.io/scheme: {{ .Values.alb.scheme }}
+    alb.ingress.kubernetes.io/target-type: {{ .Values.alb.targetType }}
+    alb.ingress.kubernetes.io/listen-ports: '{{ toJson .Values.alb.listenPorts }}'
+    alb.ingress.kubernetes.io/certificate-arn: {{ .Values.alb.certificateArn }}
+    alb.ingress.kubernetes.io/healthcheck-path: {{ .Values.alb.healthcheck.path }}
+    alb.ingress.kubernetes.io/healthcheck-port: "{{ .Values.alb.healthcheck.port }}"
+    alb.ingress.kubernetes.io/healthcheck-protocol: {{ .Values.alb.healthcheck.protocol }}
+spec:
+  rules:
+    {{- range .Values.hosts }}
+    - host: {{ .host }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ .service.name }}
+                port:
+                  number: {{ .service.port }}
+    {{- end }}
