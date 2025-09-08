@@ -38,17 +38,15 @@ storageClass:
 #     enabled: false
 
 
-redis:
-  enabled: true
-  architecture: replication    # must be "standalone" or "replication"
+redis-cluster:
   cluster:
-    enabled: true              # enables Redis Cluster mode
-    nodes: 6                   # total nodes: masters + replicas
-    replicasPerMaster: 1       # 1 replica per master
+    enabled: true
+    masterCount: 3            # Number of masters
+    replicaCount: 1           # Replicas per master
     persistence:
       enabled: true
       size: 8Gi
-      storageClass: ebs-sc    # your custom storage class
+      storageClass: ebs-sc
   auth:
     enabled: true
     password: "bitnami123"
@@ -335,7 +333,7 @@ config:
     MYSQL_DATABASE: "userdb"
     # Redis configuration using dependency service names
     # REDIS_NODES: "user-app-redis-master:6379,user-app-redis-replica-0:6379,user-app-redis-replica-1:6379,user-app-redis-replica-2:6379" # For Redis Replication
-    REDIS_NODES: "user-app-redis-redis-cluster.user-app.svc.cluster.local:6379"  # For Redis Cluster
+    REDIS_NODES: "user-app-redis-cluster.user-app.svc.cluster.local:6379"  # For Redis Cluster
     REDIS_PASSWORD: "bitnami123"
 
 # RBAC configuration

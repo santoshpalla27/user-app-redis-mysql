@@ -6,8 +6,8 @@ version: 0.1.0
 appVersion: "1.0"
 
 dependencies:
-  - name: redis
-    version: "22.0.7"
+  - name: redis-cluster
+    version: "13.0.4"
     repository: "https://charts.bitnami.com/bitnami"
   - name: mysql
     version: "14.0.3"
