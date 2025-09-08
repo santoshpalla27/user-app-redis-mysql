@@ -1,0 +1,70 @@
+{{- if .Values.frontend.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Values.frontend.name }}
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "user-app.labels" . | nindent 4 }}
+    app.kubernetes.io/component: frontend
+spec:
+  replicas: {{ .Values.frontend.replicas }}
+  strategy:
+    type: {{ .Values.frontend.strategy.type }}
+    {{- if eq .Values.frontend.strategy.type "RollingUpdate" }}
+    rollingUpdate:
+      maxUnavailable: {{ .Values.frontend.strategy.rollingUpdate.maxUnavailable }}
+      maxSurge: {{ .Values.frontend.strategy.rollingUpdate.maxSurge }}
+    {{- end }}
+  selector:
+    matchLabels:
+      {{- include "user-app.selectorLabels" . | nindent 6 }}
+      app: {{ .Values.frontend.name }}
+  template:
+    metadata:
+      labels:
+        {{- include "user-app.selectorLabels" . | nindent 8 }}
+        app: {{ .Values.frontend.name }}
+        app.kubernetes.io/component: frontend
+    spec:
+      {{- with .Values.frontend.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ .Values.global.serviceAccount.name }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      securityContext:
+        {{- toYaml .Values.frontend.securityContext | nindent 8 }}
+      volumes:
+        - name: {{ .Values.frontend.volumes.nginxTemp.name }}
+          emptyDir: {}
+        - name: {{ .Values.frontend.volumes.nginxRun.name }}
+          emptyDir: {}
+      containers:
+        - name: {{ .Values.frontend.name }}
+          image: "{{ .Values.frontend.image.repository }}:{{ .Values.frontend.image.tag }}"
+          imagePullPolicy: {{ .Values.frontend.image.pullPolicy }}
+          ports:
+            - containerPort: {{ .Values.frontend.container.port }}
+          env:
+            - name: REACT_APP_API_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ .Values.config.name }}
+                  key: REACT_APP_API_URL
+          resources:
+            {{- toYaml .Values.frontend.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.frontend.securityContext.containerSecurityContext | nindent 12 }}
+          volumeMounts:
+            - name: {{ .Values.frontend.volumes.nginxTemp.name }}
+              mountPath: {{ .Values.frontend.volumes.nginxTemp.mountPath }}
+            - name: {{ .Values.frontend.volumes.nginxRun.name }}
+              mountPath: {{ .Values.frontend.volumes.nginxRun.mountPath }}
+          startupProbe:
+            {{- toYaml .Values.frontend.probes.startup | nindent 12 }}
+          readinessProbe:
+            {{- toYaml .Values.frontend.probes.readiness | nindent 12 }}
+          livenessProbe:
+            {{- toYaml .Values.frontend.probes.liveness | nindent 12 }}
+{{- end }}

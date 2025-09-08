@@ -1,0 +1,354 @@
+# Default values for user-app
+global:
+  namespace: user-app
+  serviceAccount:
+    name: user-app
+    create: true
+
+
+storageClass:
+  enabled: true
+  name: ebs-sc
+
+
+# Redis dependency configuration
+# redis:
+#   enabled: true
+#   auth:
+#     enabled: true
+#     password: "bitnami123"
+#   architecture: replication
+#   replica:
+#     replicaCount: 3
+#   master:
+#     persistence:
+#       enabled: true
+#       size: 8Gi
+#       storageClass: ebs-sc
+#     resources:
+#       requests:
+#         memory: 256Mi
+#         cpu: 250m
+#       limits:
+#         memory: 512Mi
+#         cpu: 500m
+#   metrics:
+#     enabled: true
+#   sentinel:
+#     enabled: false
+
+
+redis:
+  enabled: true
+  architecture: cluster        # <-- cluster mode
+  cluster:
+    enabled: true
+    nodes: 6                  # 3 masters + 3 replicas (1 replica per master)
+    replicasPerMaster: 1
+    persistence:
+      enabled: true
+      size: 8Gi
+      storageClass: ebs-sc    # <-- your custom storage class
+  auth:
+    enabled: true
+    password: "bitnami123"
+  metrics:
+    enabled: true
+
+
+
+
+
+
+
+# MySQL dependency configuration  
+mysql:
+  enabled: true
+  auth:
+    rootPassword: "rootpassword123"
+    database: "userdb"
+    username: "user"
+    password: "password"
+  architecture: standalone
+  primary:
+    persistence:
+      enabled: true
+      size: 20Gi
+      storageClass: ebs-sc
+    resources:
+      requests:
+        memory: 512Mi
+        cpu: 500m
+      limits:
+        memory: 1Gi
+        cpu: 1000m
+    configuration: |-
+      [mysqld]
+      default_authentication_plugin=mysql_native_password
+      skip-name-resolve
+      explicit_defaults_for_timestamp
+      basedir=/opt/bitnami/mysql
+      plugin_dir=/opt/bitnami/mysql/lib/plugin
+      port=3306
+      socket=/opt/bitnami/mysql/tmp/mysql.sock
+      datadir=/bitnami/mysql/data
+      tmpdir=/opt/bitnami/mysql/tmp
+      max_allowed_packet=16M
+      bind-address=*
+      pid-file=/opt/bitnami/mysql/tmp/mysqld.pid
+      log-error=/opt/bitnami/mysql/logs/mysqld.log
+      character-set-server=UTF8
+      collation-server=utf8_general_ci
+      slow_query_log=0
+      slow_query_log_file=/opt/bitnami/mysql/logs/mysqld-slow.log
+      long_query_time=10.0
+      
+      [client]
+      port=3306
+      socket=/opt/bitnami/mysql/tmp/mysql.sock
+      default-character-set=UTF8
+      plugin_dir=/opt/bitnami/mysql/lib/plugin
+      
+      [manager]
+      port=3306
+      socket=/opt/bitnami/mysql/tmp/mysql.sock
+      pid-file=/opt/bitnami/mysql/tmp/mysqld.pid
+  metrics:
+    enabled: true
+
+# Backend configuration
+backend:
+  enabled: true
+  name: backend
+  image:
+    repository: santoshpalla27/3-tier
+    tag: backend-2
+    pullPolicy: IfNotPresent
+  
+  replicas: 3
+  
+  service:
+    type: ClusterIP
+    port: 5000
+    targetPort: 5000
+  
+  container:
+    port: 5000
+    
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 1
+  
+  securityContext:
+    fsGroup: 1001
+    runAsGroup: 1001
+    runAsNonRoot: true
+    runAsUser: 1001
+    containerSecurityContext:
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+          - ALL
+      privileged: false
+      readOnlyRootFilesystem: false
+  
+  probes:
+    startup:
+      httpGet:
+        path: /api/health
+        port: 5000
+        scheme: HTTP
+      failureThreshold: 60
+      initialDelaySeconds: 10
+      periodSeconds: 5
+      successThreshold: 1
+    readiness:
+      httpGet:
+        path: /api/health
+        port: 5000
+        scheme: HTTP
+      initialDelaySeconds: 5
+      periodSeconds: 10
+      failureThreshold: 3
+      successThreshold: 1
+    liveness:
+      httpGet:
+        path: /api/health
+        port: 5000
+        scheme: HTTP
+      initialDelaySeconds: 5
+      periodSeconds: 30
+      failureThreshold: 3
+      successThreshold: 1
+  
+  affinity:
+    nodeAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 1
+        preference:
+          matchExpressions:
+          - key: "topology.kubernetes.io/zone"
+            operator: In
+            values: ["us-east-1"]
+    podAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 1
+        podAffinityTerm:
+          labelSelector:
+            matchLabels:
+              app: frontend
+          topologyKey: "kubernetes.io/hostname"
+    podAntiAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 1
+        podAffinityTerm:
+          labelSelector:
+            matchExpressions:
+            - key: app
+              operator: In
+              values: [backend]
+          topologyKey: "kubernetes.io/hostname"
+
+# Frontend configuration
+frontend:
+  enabled: true
+  name: frontend
+  image:
+    repository: santoshpalla27/user-app
+    tag: frontend-v1
+    pullPolicy: Always
+  
+  replicas: 3
+  
+  service:
+    type: ClusterIP
+    port: 80
+    targetPort: 3000
+  
+  container:
+    port: 3000
+    
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 1
+  
+  resources:
+    requests:
+      cpu: "200m"
+      memory: "256Mi"
+    limits:
+      cpu: "500m"
+      memory: "512Mi"
+  
+  securityContext:
+    fsGroup: 1001
+    runAsGroup: 1001
+    runAsNonRoot: true
+    runAsUser: 1001
+    containerSecurityContext:
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+          - ALL
+      privileged: false
+      readOnlyRootFilesystem: true
+  
+  volumes:
+    nginxTemp:
+      name: nginx-temp
+      type: emptyDir
+      mountPath: /var/cache/nginx
+    nginxRun:
+      name: nginx-run
+      type: emptyDir
+      mountPath: /var/run/nginx
+  
+  probes:
+    startup:
+      tcpSocket:
+        port: 3000
+      failureThreshold: 60
+      initialDelaySeconds: 10
+      periodSeconds: 5
+      successThreshold: 1
+    readiness:
+      httpGet:
+        path: /health
+        port: 3000
+      failureThreshold: 3
+      initialDelaySeconds: 10
+      periodSeconds: 5
+      successThreshold: 1
+      timeoutSeconds: 5
+    liveness:
+      httpGet:
+        path: /health
+        port: 3000
+      periodSeconds: 30
+      timeoutSeconds: 5
+      initialDelaySeconds: 0
+      successThreshold: 1
+  
+  affinity:
+    nodeAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 1
+          preference:
+            matchExpressions:
+              - key: "topology.kubernetes.io/zone"
+                operator: In
+                values: ["us-east-1a", "us-east-1b", "us-east-1c"]
+    podAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 1
+          podAffinityTerm:
+            labelSelector:
+              matchLabels:
+                app: backend
+            topologyKey: "kubernetes.io/hostname"
+    podAntiAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 1
+          podAffinityTerm:
+            labelSelector:
+              matchExpressions:
+                - key: app
+                  operator: In
+                  values: [frontend]
+            topologyKey: "kubernetes.io/hostname"
+
+# ConfigMap configuration - Updated to use dependency services
+config:
+  name: app-config
+  data:
+    REACT_APP_API_URL: "https://backend.santosh.website"
+    NODE_ENV: "development"
+    PORT: "5000"
+    # MySQL configuration using dependency service names
+    MYSQL_HOST: "user-app-mysql"
+    MYSQL_USER: "user"
+    MYSQL_PASSWORD: "password"
+    MYSQL_DATABASE: "userdb"
+    # Redis configuration using dependency service names
+    # REDIS_NODES: "user-app-redis-master:6379,user-app-redis-replica-0:6379,user-app-redis-replica-1:6379,user-app-redis-replica-2:6379" # For Redis Replication
+    REDIS_NODES: "user-app-redis-redis-cluster.user-app.svc.cluster.local:6379"  # For Redis Cluster
+    REDIS_PASSWORD: "bitnami123"
+
+# RBAC configuration
+rbac:
+  create: true
+  role:
+    name: pod-reader
+    rules:
+    - apiGroups: [""]
+      resources: ["pods"]
+      verbs: ["get", "list"]
+  roleBinding:
+    name: pod-reader-binding
+
+# Miscellaneous
+terminationGracePeriodSeconds: 5

@@ -1,0 +1,28 @@
+1. Get the application URL by running these commands:
+{{- if .Values.frontend.enabled }}
+  export POD_NAME=$(kubectl get pods --namespace {{ .Values.global.namespace }} -l "app.kubernetes.io/name={{ include "user-app.name" . }},app.kubernetes.io/instance={{ .Release.Name }},app={{ .Values.frontend.name }}" -o jsonpath="{.items[0].metadata.name}")
+  export CONTAINER_PORT=$(kubectl get pod --namespace {{ .Values.global.namespace }} $POD_NAME -o jsonpath="{.spec.containers[0].ports[0].containerPort}")
+  echo "Visit http://127.0.0.1:8080 to use your application"
+  kubectl --namespace {{ .Values.global.namespace }} port-forward $POD_NAME 8080:$CONTAINER_PORT
+{{- end }}
+
+2. Check the status of your deployments:
+{{- if .Values.backend.enabled }}
+  kubectl get deployment {{ .Values.backend.name }} -n {{ .Values.global.namespace }}
+{{- end }}
+{{- if .Values.frontend.enabled }}
+  kubectl get deployment {{ .Values.frontend.name }} -n {{ .Values.global.namespace }}
+{{- end }}
+
+3. View your services:
+{{- if .Values.backend.enabled }}
+  kubectl get service {{ .Values.backend.name }} -n {{ .Values.global.namespace }}
+{{- end }}
+{{- if .Values.frontend.enabled }}
+  kubectl get service {{ .Values.frontend.name }} -n {{ .Values.global.namespace }}
+{{- end }}
+
+4. Check your configuration:
+  kubectl get configmap {{ .Values.config.name }} -n {{ .Values.global.namespace }} -o yaml
+
+Thank you for installing {{ .Chart.Name }}!

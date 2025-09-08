@@ -1,0 +1,96 @@
+{{- if .Values.backend.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Values.backend.name }}
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "user-app.labels" . | nindent 4 }}
+    app.kubernetes.io/component: backend
+spec:
+  replicas: {{ .Values.backend.replicas }}
+  strategy:
+    type: {{ .Values.backend.strategy.type }}
+    {{- if eq .Values.backend.strategy.type "RollingUpdate" }}
+    rollingUpdate:
+      maxUnavailable: {{ .Values.backend.strategy.rollingUpdate.maxUnavailable }}
+      maxSurge: {{ .Values.backend.strategy.rollingUpdate.maxSurge }}
+    {{- end }}
+  selector:
+    matchLabels:
+      {{- include "user-app.selectorLabels" . | nindent 6 }}
+      app: {{ .Values.backend.name }}
+  template:
+    metadata:
+      labels:
+        {{- include "user-app.selectorLabels" . | nindent 8 }}
+        app: {{ .Values.backend.name }}
+        app.kubernetes.io/component: backend
+    spec:
+      {{- with .Values.backend.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ .Values.global.serviceAccount.name }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      securityContext:
+        {{- toYaml .Values.backend.securityContext | nindent 8 }}
+      containers:
+      - name: {{ .Values.backend.name }}
+        securityContext:
+          {{- toYaml .Values.backend.securityContext.containerSecurityContext | nindent 10 }}
+        startupProbe:
+          {{- toYaml .Values.backend.probes.startup | nindent 10 }}
+        readinessProbe:
+          {{- toYaml .Values.backend.probes.readiness | nindent 10 }}
+        livenessProbe:
+          {{- toYaml .Values.backend.probes.liveness | nindent 10 }}
+        image: "{{ .Values.backend.image.repository }}:{{ .Values.backend.image.tag }}"
+        imagePullPolicy: {{ .Values.backend.image.pullPolicy }}
+        ports:
+        - containerPort: {{ .Values.backend.container.port }}
+        env:
+        - name: NODE_ENV
+          valueFrom:
+            configMapKeyRef:
+              name: {{ .Values.config.name }}
+              key: NODE_ENV 
+        - name: PORT
+          valueFrom:
+            configMapKeyRef:
+              name: {{ .Values.config.name }}
+              key: PORT 
+        - name: MYSQL_HOST
+          valueFrom:
+            configMapKeyRef:
+              name: {{ .Values.config.name }}
+              key: MYSQL_HOST 
+        - name: MYSQL_USER
+          valueFrom:
+            configMapKeyRef:
+              name: {{ .Values.config.name }}
+              key: MYSQL_USER 
+        - name: MYSQL_PASSWORD
+          valueFrom:
+            configMapKeyRef:
+              name: {{ .Values.config.name }}
+              key: MYSQL_PASSWORD 
+        - name: MYSQL_DATABASE
+          valueFrom:
+            configMapKeyRef:
+              name: {{ .Values.config.name }}
+              key: MYSQL_DATABASE 
+        - name: REDIS_NODES
+          valueFrom:
+            configMapKeyRef:
+              name: {{ .Values.config.name }}
+              key: REDIS_NODES 
+        - name: REDIS_PASSWORD
+          valueFrom:
+            configMapKeyRef:
+              name: {{ .Values.config.name }}
+              key: REDIS_PASSWORD 
+{{- end }}
+
+
+
