@@ -40,15 +40,15 @@ storageClass:
 
 redis:
   enabled: true
-  architecture: cluster        # <-- cluster mode
+  architecture: replication    # must be "standalone" or "replication"
   cluster:
-    enabled: true
-    nodes: 6                  # 3 masters + 3 replicas (1 replica per master)
-    replicasPerMaster: 1
+    enabled: true              # enables Redis Cluster mode
+    nodes: 6                   # total nodes: masters + replicas
+    replicasPerMaster: 1       # 1 replica per master
     persistence:
       enabled: true
       size: 8Gi
-      storageClass: ebs-sc    # <-- your custom storage class
+      storageClass: ebs-sc    # your custom storage class
   auth:
     enabled: true
     password: "bitnami123"
