@@ -4,6 +4,8 @@ global:
   serviceAccount:
     name: user-app
     create: true
+  redis:
+    password: bitnami123
 
 
 storageClass:
@@ -38,6 +40,8 @@ storageClass:
 #     enabled: false
 
 
+
+
 redis-cluster:
   cluster:
     enabled: true
@@ -48,11 +52,22 @@ redis-cluster:
     storageClass: "ebs-sc"
   auth:
     enabled: true
-    password: bitnami123
+    
+# global:
+#   redis:
+#     password: bitnami123     -- should be set 
 
+# kubectl create secret generic user-app-redis-cluster \
+#   --from-literal=redis-password=bitnami123 \
+#   -n user-app
+# kubectl annotate secret user-app-redis-cluster \
+#   meta.helm.sh/release-name=user-app \
+#   meta.helm.sh/release-namespace=user-app
+# kubectl label secret user-app-redis-cluster \
+#   app.kubernetes.io/managed-by=Helm
+#                                         -- to make it use our we need to create secret first
 
-
-
+# kubectl get secret user-app-redis-cluster -n user-app -o jsonpath="{.data.redis-password}" | base64 --decode
 
 
 
