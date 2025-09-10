@@ -25,4 +25,4 @@ spec:
                 name: {{ .service.name }}
                 port:
                   number: {{ .service.port }}
-    {{- end }}
+                   {{- end }}

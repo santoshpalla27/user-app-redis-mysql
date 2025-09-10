@@ -13,34 +13,6 @@ storageClass:
   name: ebs-sc
 
 
-# Redis dependency configuration
-# redis:
-#   enabled: true
-#   auth:
-#     enabled: true
-#     password: "bitnami123"
-#   architecture: replication
-#   replica:
-#     replicaCount: 3
-#   master:
-#     persistence:
-#       enabled: true
-#       size: 8Gi
-#       storageClass: ebs-sc
-#     resources:
-#       requests:
-#         memory: 256Mi
-#         cpu: 250m
-#       limits:
-#         memory: 512Mi
-#         cpu: 500m
-#   metrics:
-#     enabled: true
-#   sentinel:
-#     enabled: false
-
-
-
 
 redis-cluster:
   cluster:
@@ -52,24 +24,6 @@ redis-cluster:
     storageClass: "ebs-sc"
   auth:
     enabled: true
-    
-# global:
-#   redis:
-#     password: bitnami123     -- should be set 
-
-# kubectl create secret generic user-app-redis-cluster \
-#   --from-literal=redis-password=bitnami123 \
-#   -n user-app
-# kubectl annotate secret user-app-redis-cluster \
-#   meta.helm.sh/release-name=user-app \
-#   meta.helm.sh/release-namespace=user-app
-# kubectl label secret user-app-redis-cluster \
-#   app.kubernetes.io/managed-by=Helm
-#                                         -- to make it use our we need to create secret first
-
-# kubectl get secret user-app-redis-cluster -n user-app -o jsonpath="{.data.redis-password}" | base64 --decode
-
-
 
 # MySQL dependency configuration  
 mysql:
@@ -86,39 +40,43 @@ mysql:
       enabled: true
       size: 20Gi
       storageClass: ebs-sc
+    
+  podSecurityContext:
+    fsGroup: 1001
+  securityContext:
+    runAsUser: 1001
+    runAsNonRoot: true
 
-    resources:
-      requests:
-        memory: 512Mi
-        cpu: 500m
-      limits:
-        memory: 1Gi
-        cpu: 1000m
+  resources:
+    requests:
+      memory: 512Mi
+      cpu: 500m
+    limits:
+      memory: 1Gi
+      cpu: 1000m
 
-    # Custom configuration - simplified to avoid socket/startup issues
-    configuration: |-
-      [mysqld]
-      default_authentication_plugin=mysql_native_password
-      skip-name-resolve
-      explicit_defaults_for_timestamp
-      max_allowed_packet=16M
-      bind-address=0.0.0.0
-      character-set-server=UTF8
-      collation-server=utf8_general_ci
-      slow_query_log=0
+  service:
+    type: ClusterIP
+    port: 3306
 
-      [client]
-      default-character-set=UTF8
+  configuration: |-
+    [mysqld]
+    default_authentication_plugin=mysql_native_password
+    skip-name-resolve
+    explicit_defaults_for_timestamp
+    max_allowed_packet=16M
+    character-set-server=UTF8
+    collation-server=utf8_general_ci
+    slow_query_log=0
 
-  # Startup probe configuration
+    [client]
+    default-character-set=UTF8
+
   startupProbe:
     enabled: false
 
-
-
   metrics:
     enabled: true
-
 
 # Backend configuration
 backend:
@@ -333,7 +291,7 @@ config:
     NODE_ENV: "development"
     PORT: "5000"
     # MySQL configuration using dependency service names
-    MYSQL_HOST: "user-app-mysql"
+    MYSQL_HOST: "user-app-mysql.user-app.svc.cluster.local"
     MYSQL_USER: "user"
     MYSQL_PASSWORD: "password"
     MYSQL_DATABASE: "userdb"
@@ -367,7 +325,7 @@ alb:
   listenPorts:
     - HTTP: 80
     - HTTPS: 443
-  certificateArn: arn:aws:acm:us-east-1:841740286449:certificate/4009d0e4-f2aa-49ee-ae43-cce3c63f95b5
+  certificateArn: arn:aws:acm:us-east-1:841740286449:certificate/f30abe8d-491d-407f-ba39-38d3b6cdfdb0
 
   healthcheck:
     path: /health
