@@ -322,6 +322,7 @@ terminationGracePeriodSeconds: 5
 
 
 alb:
+  name: user-app-alb
   scheme: internet-facing
   targetType: ip
   listenPorts:
