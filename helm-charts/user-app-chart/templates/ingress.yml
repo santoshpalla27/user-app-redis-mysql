@@ -1,28 +1,37 @@
+
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
-  name: ingress
-  namespace: {{ .Values.global.namespace }}
+  name: {{ include "my-app-ingress-chart.fullname" . }}
+  namespace: {{ .Values.namespace }}
   annotations:
     kubernetes.io/ingress.class: alb
     alb.ingress.kubernetes.io/scheme: {{ .Values.alb.scheme }}
     alb.ingress.kubernetes.io/target-type: {{ .Values.alb.targetType }}
-    alb.ingress.kubernetes.io/listen-ports: '{{ toJson .Values.alb.listenPorts }}'
+    alb.ingress.kubernetes.io/listen-ports: {{ .Values.alb.listenPorts | toJson }}
     alb.ingress.kubernetes.io/certificate-arn: {{ .Values.alb.certificateArn }}
-    alb.ingress.kubernetes.io/healthcheck-path: {{ .Values.alb.healthcheck.path }}
-    alb.ingress.kubernetes.io/healthcheck-port: "{{ .Values.alb.healthcheck.port }}"
-    alb.ingress.kubernetes.io/healthcheck-protocol: {{ .Values.alb.healthcheck.protocol }}
+    alb.ingress.kubernetes.io/healthcheck-path: {{ .Values.alb.healthcheckPath }}
+    alb.ingress.kubernetes.io/healthcheck-port: "{{ .Values.alb.healthcheckPort }}"
+    alb.ingress.kubernetes.io/healthcheck-protocol: {{ .Values.alb.healthcheckProtocol }}
 spec:
   rules:
-    {{- range .Values.hosts }}
-    - host: {{ .host }}
+    - host: {{ .Values.hosts.frontend.host }}
       http:
         paths:
           - path: /
             pathType: Prefix
             backend:
               service:
-                name: {{ .service.name }}
+                name: {{ .Values.hosts.frontend.serviceName }}
                 port:
-                  number: {{ .service.port }}
-                   {{- end }}
+                  number: {{ .Values.hosts.frontend.servicePort }}
+    - host: {{ .Values.hosts.backend.host }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ .Values.hosts.backend.serviceName }}
+                port:
+                  number: {{ .Values.hosts.backend.servicePort }}

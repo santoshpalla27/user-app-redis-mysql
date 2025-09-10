@@ -319,25 +319,25 @@ terminationGracePeriodSeconds: 5
 
 
 
+
+
 alb:
   scheme: internet-facing
   targetType: ip
   listenPorts:
     - HTTP: 80
     - HTTPS: 443
-  certificateArn: arn:aws:acm:us-east-1:841740286449:certificate/f30abe8d-491d-407f-ba39-38d3b6cdfdb0
-
-  healthcheck:
-    path: /health
-    port: 80
-    protocol: HTTP
+  certificateArn: "arn:aws:acm:us-east-1:841740286449:certificate/f30abe8d-491d-407f-ba39-38d3b6cdfdb0"
+  healthcheckPath: /health
+  healthcheckPort: 80
+  healthcheckProtocol: HTTP
 
 hosts:
-  - host: santosh.website
-    service:
-      name: frontend
-      port: 80
-  - host: backend.santosh.website
-    service:
-      name: backend
-      port: 5000
+  frontend:
+    host: santosh.website
+    serviceName: frontend
+    servicePort: 80
+  backend:
+    host: backend.santosh.website
+    serviceName: backend
+    servicePort: 5000
