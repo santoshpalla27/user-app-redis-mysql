@@ -2,7 +2,7 @@ apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: my-app-ingress
-  namespace: my-app-namespace
+  namespace: user-app
   annotations:
     kubernetes.io/ingress.class: alb                           # Use AWS ALB
     alb.ingress.kubernetes.io/scheme: internet-facing          # Can be 'internal' if internal LB

@@ -26,7 +26,7 @@ spec:
                 matchExpressions:
                   - key: "topology.kubernetes.io/zone"
                     operator: In
-                    vvalues: ["us-east-1a", "us-east-1b", "us-east-1c"]
+                    values: ["us-east-1a", "us-east-1b", "us-east-1c"]
 
         podAffinity:
           preferredDuringSchedulingIgnoredDuringExecution:

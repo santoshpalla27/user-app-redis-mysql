@@ -3,7 +3,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: app-config
-  namespace: three-tier-app
+  namespace: user-app
 data:
   # REACT_APP_API_URL: "https://backend.santosh.website"
   NODE_ENV: "development"
