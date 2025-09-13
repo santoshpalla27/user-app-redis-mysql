@@ -15,8 +15,8 @@ data:
     appendfsync everysec
     maxmemory 256mb
     maxmemory-policy allkeys-lru
-
 ---
+# Headless Service for StatefulSet
 apiVersion: v1
 kind: Service
 metadata:
@@ -35,8 +35,8 @@ spec:
   - name: redis-cluster
     port: 16379
     targetPort: 16379
-
 ---
+# ClusterIP Service (optional for apps)
 apiVersion: v1
 kind: Service
 metadata:
@@ -52,8 +52,8 @@ spec:
     port: 6379
     targetPort: 6379
   type: ClusterIP
-
 ---
+# Redis StatefulSet
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -75,7 +75,7 @@ spec:
         image: bitnami/redis-cluster:7.0
         env:
         - name: REDIS_NODES
-          value: "redis-0.redis-headless.default.svc.cluster.local:6379 redis-1.redis-headless.default.svc.cluster.local:6379 redis-2.redis-headless.default.svc.cluster.local:6379 redis-3.redis-headless.default.svc.cluster.local:6379 redis-4.redis-headless.default.svc.cluster.local:6379 redis-5.redis-headless.default.svc.cluster.local:6379"
+          value: "redis-0.redis-headless.user-app.svc.cluster.local:6379 redis-1.redis-headless.user-app.svc.cluster.local:6379 redis-2.redis-headless.user-app.svc.cluster.local:6379 redis-3.redis-headless.user-app.svc.cluster.local:6379 redis-4.redis-headless.user-app.svc.cluster.local:6379 redis-5.redis-headless.user-app.svc.cluster.local:6379"
         - name: REDIS_CLUSTER_REPLICAS
           value: "1"
         - name: REDIS_CLUSTER_CREATOR
@@ -88,6 +88,8 @@ spec:
           valueFrom:
             fieldRef:
               fieldPath: status.podIP
+        - name: REDIS_EXTRA_FLAGS
+          value: "--include /bitnami/redis/mounted-etc/redis.conf"
         ports:
         - containerPort: 6379
           name: redis
@@ -97,8 +99,7 @@ spec:
         - name: redis-data
           mountPath: /bitnami/redis/data
         - name: redis-config
-          mountPath: /opt/bitnami/redis/etc/redis.conf
-          subPath: redis.conf
+          mountPath: /bitnami/redis/mounted-etc
         livenessProbe:
           exec:
             command:
@@ -128,7 +129,6 @@ spec:
       resources:
         requests:
           storage: 5Gi
-
 ---
 # Redis Cluster Initialization Job
 apiVersion: batch/v1
@@ -149,10 +149,10 @@ spec:
         - |
           sleep 60
           redis-cli --cluster create \
-            redis-0.redis-headless.default.svc.cluster.local:6379 \
-            redis-1.redis-headless.default.svc.cluster.local:6379 \
-            redis-2.redis-headless.default.svc.cluster.local:6379 \
-            redis-3.redis-headless.default.svc.cluster.local:6379 \
-            redis-4.redis-headless.default.svc.cluster.local:6379 \
-            redis-5.redis-headless.default.svc.cluster.local:6379 \
+            redis-0.redis-headless.user-app.svc.cluster.local:6379 \
+            redis-1.redis-headless.user-app.svc.cluster.local:6379 \
+            redis-2.redis-headless.user-app.svc.cluster.local:6379 \
+            redis-3.redis-headless.user-app.svc.cluster.local:6379 \
+            redis-4.redis-headless.user-app.svc.cluster.local:6379 \
+            redis-5.redis-headless.user-app.svc.cluster.local:6379 \
             --cluster-replicas 1 --cluster-yes
