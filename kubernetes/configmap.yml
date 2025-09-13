@@ -5,13 +5,13 @@ metadata:
   name: app-config
   namespace: three-tier-app
 data:
-  REACT_APP_API_URL: "https://backend.santosh.website"
+  # REACT_APP_API_URL: "https://backend.santosh.website"
   NODE_ENV: "development"
   PORT: "5000"
-  MYSQL_HOST: "mysql"
-  MYSQL_USER: "user"
-  MYSQL_PASSWORD: "password"
+  MYSQL_HOST: "mysql-0.mysql-headless.user-app.svc.cluster.local:3306"
+  MYSQL_USER: "myuser"
+  MYSQL_PASSWORD: "mysqlpass"
   MYSQL_DATABASE: "userdb"
-  REDIS_NODES: "redis-node-0:6379,redis-node-1:6379,redis-node-2:6379,redis-node-3:6379,redis-node-4:6379,redis-node-5:6379"
+  REDIS_NODES: "redis-0.redis-headless.user-app.svc.cluster.local:6379,redis-1.redis-headless.user-app.svc.cluster.local:6379,redis-2.redis-headless.user-app.svc.cluster.local:6379,redis-3.redis-headless.user-app.svc.cluster.local:6379,redis-4.redis-headless.user-app.svc.cluster.local:6379,redis-5.redis-headless.user-app.svc.cluster.local:6379"
   REDIS_PASSWORD: "bitnami123"
 

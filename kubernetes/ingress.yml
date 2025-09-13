@@ -1,0 +1,37 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: my-app-ingress
+  namespace: my-app-namespace
+  annotations:
+    kubernetes.io/ingress.class: alb                           # Use AWS ALB
+    alb.ingress.kubernetes.io/scheme: internet-facing          # Can be 'internal' if internal LB
+    alb.ingress.kubernetes.io/target-type: ip                  # 'ip' or 'instance'
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80},{"HTTPS":443}]'
+    alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:region:account-id:certificate/cert-id  # For HTTPS
+    alb.ingress.kubernetes.io/healthcheck-path: /health
+    alb.ingress.kubernetes.io/healthcheck-port: "80"
+    alb.ingress.kubernetes.io/healthcheck-protocol: HTTP
+spec:
+  rules:
+    - host: santosh.website
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: frontend
+                port:
+                  number: 80
+    - host: backend.santosh.website
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: backend
+                port:
+                  number: 5000
+

@@ -56,6 +56,21 @@ spec:
         runAsGroup: 1001
         runAsNonRoot: true
         runAsUser: 1001
+      
+      initContainers:
+      - name: wait-for-dependencies
+        image: busybox:1.35
+        command:
+          - sh
+          - -c
+          - |
+            echo "Waiting for MySQL..."
+            until nc -z "$MYSQL_HOST" 3306; do sleep 2; done
+            echo "MySQL is ready!"
+            echo "Waiting for Redis..."
+            until nc -z "$(echo $REDIS_NODES | cut -d',' -f1 | cut -d':' -f1)" 6379; do sleep 2; done
+            echo "Redis is ready!"
+
       containers:
       - name: backend
         securityContext:
@@ -92,7 +107,7 @@ spec:
           periodSeconds: 30
           failureThreshold: 3
           successThreshold: 1
-        image: santoshpalla27/3-tier:backend-2
+        image: santoshpalla27/3-tier:kubernetes-backend-v1
         ports:
         - containerPort: 5000
         env:

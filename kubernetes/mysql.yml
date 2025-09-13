@@ -1,0 +1,180 @@
+
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: ebs-sc
+provisioner: ebs.csi.aws.com  # Use the EBS CSI driver instead
+allowVolumeExpansion: true
+parameters:
+  type: gp3  # Change to 'gp3' for cost savings and better performance
+  fsType: ext4
+reclaimPolicy: Retain
+volumeBindingMode: WaitForFirstConsumer
+
+--- 
+apiVersion: v1
+kind: Secret
+metadata:
+  name: mysql-secret
+  namespace: user-app
+type: Opaque
+data:
+  mysql-root-password: bXlzcWxyb290cGFzcw== # mysqlrootpass (base64 encoded)
+  mysql-password: bXlzcWxwYXNz # mysqlpass (base64 encoded)
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mysql-config
+  namespace: user-app
+data:
+  my.cnf: |
+    [mysqld]
+    default-authentication-plugin=mysql_native_password
+    bind-address=0.0.0.0
+    max_connections=200
+    innodb_buffer_pool_size=256M
+    innodb_log_file_size=64M
+
+  init.sql: |
+    CREATE DATABASE IF NOT EXISTS userdb;
+
+    CREATE TABLE IF NOT EXISTS userdb.users (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      name VARCHAR(100) NOT NULL,
+      email VARCHAR(100) NOT NULL UNIQUE,
+      phone VARCHAR(20),
+      address TEXT,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+
+    INSERT INTO userdb.users (name, email, phone, address) VALUES
+      ('John Doe', 'john@example.com', '555-1234', '123 Main St, Anytown'),
+      ('Jane Smith', 'jane@example.com', '555-5678', '456 Oak Ave, Somewhere'),
+      ('Alice Johnson', 'alice@example.com', '555-9012', '789 Pine Rd, Nowhere');
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mysql-headless
+  namespace: user-app
+  labels:
+    app: mysql
+spec:
+  clusterIP: None
+  selector:
+    app: mysql
+  ports:
+  - name: mysql
+    port: 3306
+    targetPort: 3306
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mysql-service
+  namespace: user-app
+  labels:
+    app: mysql
+spec:
+  selector:
+    app: mysql
+  ports:
+  - name: mysql
+    port: 3306
+    targetPort: 3306
+  type: ClusterIP
+
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mysql
+  namespace: user-app
+spec:
+  serviceName: mysql-headless
+  replicas: 3
+  selector:
+    matchLabels:
+      app: mysql
+  template:
+    metadata:
+      labels:
+        app: mysql
+    spec:
+      containers:
+      - name: mysql
+        image: bitnami/mysql:8.0
+        env:
+        - name: MYSQL_ROOT_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: mysql-secret
+              key: mysql-root-password
+        - name: MYSQL_DATABASE
+          value: "userdb"
+        - name: MYSQL_USER
+          value: "myuser"
+        - name: MYSQL_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: mysql-secret
+              key: mysql-password
+        - name: MYSQL_REPLICATION_MODE
+          value: "master"
+        - name: MYSQL_REPLICATION_USER
+          value: "replicator"
+        - name: MYSQL_REPLICATION_PASSWORD
+          value: "replicatorpass"
+        ports:
+        - containerPort: 3306
+          name: mysql
+        volumeMounts:
+        - name: mysql-data
+          mountPath: /bitnami/mysql/data
+        - name: mysql-config
+          mountPath: /opt/bitnami/mysql/conf/my.cnf
+          subPath: my.cnf
+        - name: mysql-init
+          mountPath: /docker-entrypoint-initdb.d/init.sql
+          subPath: init.sql   
+        livenessProbe:
+          exec:
+            command:
+            - /bin/bash
+            - -c
+            - mysqladmin ping -h localhost -u root -p$MYSQL_ROOT_PASSWORD
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+        readinessProbe:
+          exec:
+            command:
+            - /bin/bash
+            - -c
+            - mysql -h localhost -u root -p$MYSQL_ROOT_PASSWORD -e "SELECT 1"
+          initialDelaySeconds: 5
+          periodSeconds: 2
+          timeoutSeconds: 1
+      volumes:
+      - name: mysql-config
+        configMap:
+          name: mysql-config
+      - name: mysql-init
+        configMap:
+          name: mysql-config
+          items:
+          - key: init.sql
+            path: init.sql
+  volumeClaimTemplates:
+  - metadata:
+      name: mysql-data
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      resources:
+        requests:
+          storage: 10Gi
+      storageClassName: "ebs-sc"

@@ -1,0 +1,158 @@
+# Redis Cluster Configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: redis-config
+  namespace: user-app
+data:
+  redis.conf: |
+    bind 0.0.0.0
+    port 6379
+    cluster-enabled yes
+    cluster-config-file nodes.conf
+    cluster-node-timeout 5000
+    appendonly yes
+    appendfsync everysec
+    maxmemory 256mb
+    maxmemory-policy allkeys-lru
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-headless
+  namespace: user-app
+  labels:
+    app: redis
+spec:
+  clusterIP: None
+  selector:
+    app: redis
+  ports:
+  - name: redis
+    port: 6379
+    targetPort: 6379
+  - name: redis-cluster
+    port: 16379
+    targetPort: 16379
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-service
+  namespace: user-app
+  labels:
+    app: redis
+spec:
+  selector:
+    app: redis
+  ports:
+  - name: redis
+    port: 6379
+    targetPort: 6379
+  type: ClusterIP
+
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: redis
+  namespace: user-app
+spec:
+  serviceName: redis-headless
+  replicas: 6
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      containers:
+      - name: redis
+        image: bitnami/redis-cluster:7.0
+        env:
+        - name: REDIS_NODES
+          value: "redis-0.redis-headless.default.svc.cluster.local:6379 redis-1.redis-headless.default.svc.cluster.local:6379 redis-2.redis-headless.default.svc.cluster.local:6379 redis-3.redis-headless.default.svc.cluster.local:6379 redis-4.redis-headless.default.svc.cluster.local:6379 redis-5.redis-headless.default.svc.cluster.local:6379"
+        - name: REDIS_CLUSTER_REPLICAS
+          value: "1"
+        - name: REDIS_CLUSTER_CREATOR
+          value: "yes"
+        - name: ALLOW_EMPTY_PASSWORD
+          value: "yes"
+        - name: REDIS_CLUSTER_DYNAMIC_IPS
+          value: "no"
+        - name: REDIS_CLUSTER_ANNOUNCE_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+        ports:
+        - containerPort: 6379
+          name: redis
+        - containerPort: 16379
+          name: redis-cluster
+        volumeMounts:
+        - name: redis-data
+          mountPath: /bitnami/redis/data
+        - name: redis-config
+          mountPath: /opt/bitnami/redis/etc/redis.conf
+          subPath: redis.conf
+        livenessProbe:
+          exec:
+            command:
+            - redis-cli
+            - ping
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+        readinessProbe:
+          exec:
+            command:
+            - redis-cli
+            - ping
+          initialDelaySeconds: 5
+          periodSeconds: 2
+          timeoutSeconds: 1
+      volumes:
+      - name: redis-config
+        configMap:
+          name: redis-config
+  volumeClaimTemplates:
+  - metadata:
+      name: redis-data
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      storageClassName: "ebs-sc"
+      resources:
+        requests:
+          storage: 5Gi
+
+---
+# Redis Cluster Initialization Job
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: redis-cluster-init
+  namespace: user-app
+spec:
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+      - name: redis-cluster-init
+        image: bitnami/redis-cluster:7.0
+        command:
+        - /bin/bash
+        - -c
+        - |
+          sleep 60
+          redis-cli --cluster create \
+            redis-0.redis-headless.default.svc.cluster.local:6379 \
+            redis-1.redis-headless.default.svc.cluster.local:6379 \
+            redis-2.redis-headless.default.svc.cluster.local:6379 \
+            redis-3.redis-headless.default.svc.cluster.local:6379 \
+            redis-4.redis-headless.default.svc.cluster.local:6379 \
+            redis-5.redis-headless.default.svc.cluster.local:6379 \
+            --cluster-replicas 1 --cluster-yes

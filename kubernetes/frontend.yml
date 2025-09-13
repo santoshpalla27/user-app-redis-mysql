@@ -64,16 +64,16 @@ spec:
 
       containers:
         - name: frontend
-          image: santoshpalla27/user-app:frontend-v1
+          image: santoshpalla27/user-app:kubernetes-frontend-v1
           imagePullPolicy: Always
           ports:
             - containerPort: 3000
-          env:
-            - name: REACT_APP_API_URL
-              valueFrom:
-                configMapKeyRef:
-                  name: app-config
-                  key: REACT_APP_API_URL
+          # env:
+          #   - name: REACT_APP_API_URL
+          #     valueFrom:
+          #       configMapKeyRef:
+          #         name: app-config
+          #         key: REACT_APP_API_URL
           resources:
             requests:
               cpu: "200m"
