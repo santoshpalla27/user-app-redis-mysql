@@ -29,12 +29,12 @@ spec:
   selector:
     app: redis
   ports:
-  - name: redis
-    port: 6379
-    targetPort: 6379
-  - name: redis-cluster
-    port: 16379
-    targetPort: 16379
+    - name: redis
+      port: 6379
+      targetPort: 6379
+    - name: redis-cluster
+      port: 16379
+      targetPort: 16379
 ---
 # ClusterIP Service (optional for apps)
 apiVersion: v1
@@ -48,9 +48,9 @@ spec:
   selector:
     app: redis
   ports:
-  - name: redis
-    port: 6379
-    targetPort: 6379
+    - name: redis
+      port: 6379
+      targetPort: 6379
   type: ClusterIP
 ---
 # Redis StatefulSet
@@ -70,6 +70,8 @@ spec:
       labels:
         app: redis
     spec:
+      securityContext:
+        fsGroup: 1001     # Fix for volume permission
       containers:
       - name: redis
         image: bitnami/redis-cluster:7.0
@@ -116,10 +118,6 @@ spec:
           initialDelaySeconds: 5
           periodSeconds: 2
           timeoutSeconds: 1
-      volumes:
-      - name: redis-config
-        configMap:
-          name: redis-config
   volumeClaimTemplates:
   - metadata:
       name: redis-data

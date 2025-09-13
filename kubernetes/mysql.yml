@@ -1,17 +1,15 @@
-
 apiVersion: storage.k8s.io/v1
 kind: StorageClass
 metadata:
   name: ebs-sc
-provisioner: ebs.csi.aws.com  # Use the EBS CSI driver instead
+provisioner: ebs.csi.aws.com
 allowVolumeExpansion: true
 parameters:
-  type: gp3  # Change to 'gp3' for cost savings and better performance
+  type: gp3
   fsType: ext4
 reclaimPolicy: Retain
 volumeBindingMode: WaitForFirstConsumer
-
---- 
+---
 apiVersion: v1
 kind: Secret
 metadata:
@@ -19,9 +17,8 @@ metadata:
   namespace: user-app
 type: Opaque
 data:
-  mysql-root-password: bXlzcWxyb290cGFzcw== # mysqlrootpass (base64 encoded)
-  mysql-password: bXlzcWxwYXNz # mysqlpass (base64 encoded)
-
+  mysql-root-password: bXlzcWxyb290cGFzcw==   # mysqlrootpass
+  mysql-password: bXlzcWxwYXNz                 # mysqlpass
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -36,10 +33,8 @@ data:
     max_connections=200
     innodb_buffer_pool_size=256M
     innodb_log_file_size=64M
-
   init.sql: |
     CREATE DATABASE IF NOT EXISTS userdb;
-
     CREATE TABLE IF NOT EXISTS userdb.users (
       id INT AUTO_INCREMENT PRIMARY KEY,
       name VARCHAR(100) NOT NULL,
@@ -48,12 +43,10 @@ data:
       address TEXT,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
-
     INSERT INTO userdb.users (name, email, phone, address) VALUES
       ('John Doe', 'john@example.com', '555-1234', '123 Main St, Anytown'),
       ('Jane Smith', 'jane@example.com', '555-5678', '456 Oak Ave, Somewhere'),
       ('Alice Johnson', 'alice@example.com', '555-9012', '789 Pine Rd, Nowhere');
-
 ---
 apiVersion: v1
 kind: Service
@@ -67,10 +60,9 @@ spec:
   selector:
     app: mysql
   ports:
-  - name: mysql
-    port: 3306
-    targetPort: 3306
-
+    - name: mysql
+      port: 3306
+      targetPort: 3306
 ---
 apiVersion: apps/v1
 kind: StatefulSet
@@ -116,6 +108,8 @@ spec:
           value: "replicator"
         - name: MYSQL_REPLICATION_PASSWORD
           value: "replicatorpass"
+        - name: MYSQL_EXTRA_FLAGS
+          value: "--defaults-extra-file=/opt/bitnami/mysql/conf/mounted-etc/my.cnf"
         ports:
         - containerPort: 3306
           name: mysql
@@ -123,11 +117,10 @@ spec:
         - name: mysql-data
           mountPath: /bitnami/mysql/data
         - name: mysql-config
-          mountPath: /opt/bitnami/mysql/conf/my.cnf
-          subPath: my.cnf
+          mountPath: /opt/bitnami/mysql/conf/mounted-etc
         - name: mysql-init
           mountPath: /docker-entrypoint-initdb.d/init.sql
-          subPath: init.sql   
+          subPath: init.sql
         livenessProbe:
           exec:
             command:
@@ -150,6 +143,9 @@ spec:
       - name: mysql-config
         configMap:
           name: mysql-config
+          items:
+          - key: my.cnf
+            path: my.cnf
       - name: mysql-init
         configMap:
           name: mysql-config
@@ -161,7 +157,7 @@ spec:
       name: mysql-data
     spec:
       accessModes: ["ReadWriteOnce"]
+      storageClassName: "ebs-sc"
       resources:
         requests:
           storage: 10Gi
-      storageClassName: "ebs-sc"
