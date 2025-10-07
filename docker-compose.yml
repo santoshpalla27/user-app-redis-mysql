@@ -15,7 +15,7 @@ services:
       - REACT_APP_API_URL=""
       - WDS_SOCKET_PORT=0
     volumes:
-      - ./nginx-cache:/var/cache/nginx
+      - /nginx-cache:/var/cache/nginx
       - /nginx-run:/var/run/nginx
       
 
@@ -26,7 +26,10 @@ services:
     ports:
       - "5000:5000"
     depends_on:
-      - mysql
+      mysql:
+        condition: service_healthy
+      redis-node-0: # Only need to depend on one node, as it handles init
+        condition: service_healthy
     environment:
       - NODE_ENV=development
       - PORT=5000
@@ -72,128 +75,75 @@ services:
       start_period: 30s
 
   # Redis Cluster Nodes
+  # --- Redis Cluster Nodes (Now Automated) ---
+  x-redis-node-config: &redis-node-config
+  image: bitnami/redis:7.2.4
+  networks:
+    - redis-cluster
+  environment:
+    # --- Core Bitnami Cluster Configuration ---
+    - REDIS_MODE=cluster
+    - REDIS_CLUSTER_REPLICAS=1
+    - REDIS_NODES=redis-node-0 redis-node-1 redis-node-2 redis-node-3 redis-node-4 redis-node-5
+    - REDIS_PASSWORD=bitnami123
+    # --- Recommended for Docker Networking ---
+    - REDIS_CLUSTER_ANNOUNCE_HOSTNAME=yes # Announce using the container name
+
   redis-node-0:
-    image: bitnamicharts/redis-cluster:12.0.13
+    <<: *redis-node-config # Use the anchor
     container_name: redis-node-0
-    environment:
-      - REDIS_PASSWORD=bitnami123
-      - REDIS_PORT_NUMBER=6379
-      - REDIS_CLUSTER_ANNOUNCE_IP=redis-node-0
-      - REDIS_NODES=redis-node-0:6379,redis-node-1:6379,redis-node-2:6379,redis-node-3:6379,redis-node-4:6379,redis-node-5:6379
-    volumes:
-      - redis-data-0:/bitnami
-    networks:
-      - redis-cluster
     ports:
       - "7000:6379"
+    volumes:
+      - redis-data-0:/bitnami/redis/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-h", "localhost", "-a", "bitnami123", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 15s
 
   redis-node-1:
-    image: bitnamicharts/redis-cluster:12.0.13
+    <<: *redis-node-config
     container_name: redis-node-1
-    environment:
-      - REDIS_PASSWORD=bitnami123
-      - REDIS_PORT_NUMBER=6379
-      - REDIS_CLUSTER_ANNOUNCE_IP=redis-node-1
-      - REDIS_NODES=redis-node-0:6379,redis-node-1:6379,redis-node-2:6379,redis-node-3:6379,redis-node-4:6379,redis-node-5:6379
-    volumes:
-      - redis-data-1:/bitnami
-    networks:
-      - redis-cluster
     ports:
       - "7001:6379"
+    volumes:
+      - redis-data-1:/bitnami/redis/data
 
   redis-node-2:
-    image: bitnamicharts/redis-cluster:12.0.13
+    <<: *redis-node-config
     container_name: redis-node-2
-    environment:
-      - REDIS_PASSWORD=bitnami123
-      - REDIS_PORT_NUMBER=6379
-      - REDIS_CLUSTER_ANNOUNCE_IP=redis-node-2
-      - REDIS_NODES=redis-node-0:6379,redis-node-1:6379,redis-node-2:6379,redis-node-3:6379,redis-node-4:6379,redis-node-5:6379
-    volumes:
-      - redis-data-2:/bitnami
-    networks:
-      - redis-cluster
     ports:
       - "7002:6379"
+    volumes:
+      - redis-data-2:/bitnami/redis/data
 
   redis-node-3:
-    image: bitnamicharts/redis-cluster:12.0.13
+    <<: *redis-node-config
     container_name: redis-node-3
-    environment:
-      - REDIS_PASSWORD=bitnami123
-      - REDIS_PORT_NUMBER=6379
-      - REDIS_CLUSTER_ANNOUNCE_IP=redis-node-3
-      - REDIS_NODES=redis-node-0:6379,redis-node-1:6379,redis-node-2:6379,redis-node-3:6379,redis-node-4:6379,redis-node-5:6379
-    volumes:
-      - redis-data-3:/bitnami
-    networks:
-      - redis-cluster
     ports:
       - "7003:6379"
+    volumes:
+      - redis-data-3:/bitnami/redis/data
 
   redis-node-4:
-    image: bitnamicharts/redis-cluster:12.0.13
+    <<: *redis-node-config
     container_name: redis-node-4
-    environment:
-      - REDIS_PASSWORD=bitnami123
-      - REDIS_PORT_NUMBER=6379
-      - REDIS_CLUSTER_ANNOUNCE_IP=redis-node-4
-      - REDIS_NODES=redis-node-0:6379,redis-node-1:6379,redis-node-2:6379,redis-node-3:6379,redis-node-4:6379,redis-node-5:6379
-    volumes:
-      - redis-data-4:/bitnami
-    networks:
-      - redis-cluster
     ports:
       - "7004:6379"
+    volumes:
+      - redis-data-4:/bitnami/redis/data
 
   redis-node-5:
-    image: bitnamicharts/redis-cluster:12.0.13
+    <<: *redis-node-config
     container_name: redis-node-5
-    environment:
-      - REDIS_PASSWORD=bitnami123
-      - REDIS_PORT_NUMBER=6379
-      - REDIS_CLUSTER_ANNOUNCE_IP=redis-node-5
-      - REDIS_NODES=redis-node-0:6379,redis-node-1:6379,redis-node-2:6379,redis-node-3:6379,redis-node-4:6379,redis-node-5:6379
-    volumes:
-      - redis-data-5:/bitnami
-    networks:
-      - redis-cluster
     ports:
       - "7005:6379"
+    volumes:
+      - redis-data-5:/bitnami/redis/data
 
-  cluster-init:
-    image: bitnamicharts/redis-cluster:12.0.13
-    depends_on:
-      - redis-node-0
-      - redis-node-1
-      - redis-node-2
-      - redis-node-3
-      - redis-node-4
-      - redis-node-5
-    networks:
-      - redis-cluster
-    restart: "no"
-    command: >
-      bash -c '
-        echo "🔄 Waiting for Redis nodes to be ready..."
-        sleep 10
-        for NODE in redis-node-0 redis-node-1 redis-node-2 redis-node-3 redis-node-4 redis-node-5; do
-          until redis-cli -h $${NODE} -a bitnami123 ping | grep -q PONG; do
-            echo "Waiting for $${NODE}..."
-            sleep 2
-          done
-          echo "$${NODE} is ready!"
-        done
-        
-        echo "🚀 Creating Redis Cluster..."
-        echo "yes" | redis-cli --cluster create \
-          redis-node-0:6379 redis-node-1:6379 redis-node-2:6379 \
-          redis-node-3:6379 redis-node-4:6379 redis-node-5:6379 \
-          --cluster-replicas 1 -a bitnami123
-        
-        echo "✅ Cluster initialization completed."
-      '
+# --- We NO LONGER NEED the cluster-init service ---
 
 networks:
   app-network:

@@ -1,3 +1,7 @@
+The Bitnami image is designed to do this for you. By providing the correct environment variables, the first node to start (redis-node-0) will automatically wait for the others and then run the redis-cli --cluster create command internally. Your manual cluster-init service is no longer needed.
+
+
+
 # User Record Management App
 
 A full-stack application demonstrating how to use React, Node.js, MySQL, and Redis Cluster for managing user records.
