@@ -77,17 +77,16 @@ services:
   # Redis Cluster Nodes
   # --- Redis Cluster Nodes (Now Automated) ---
   x-redis-node-config: &redis-node-config
-  image: bitnami/redis:7.2.4
-  networks:
-    - redis-cluster
-  environment:
-    # --- Core Bitnami Cluster Configuration ---
-    - REDIS_MODE=cluster
-    - REDIS_CLUSTER_REPLICAS=1
-    - REDIS_NODES=redis-node-0 redis-node-1 redis-node-2 redis-node-3 redis-node-4 redis-node-5
-    - REDIS_PASSWORD=bitnami123
-    # --- Recommended for Docker Networking ---
-    - REDIS_CLUSTER_ANNOUNCE_HOSTNAME=yes # Announce using the container name
+    image: bitnami/redis:7.2.4
+    networks:
+      - redis-cluster
+    environment:
+      - REDIS_MODE=cluster
+      - REDIS_CLUSTER_REPLICAS=1
+      - REDIS_NODES=redis-node-0 redis-node-1 redis-node-2 redis-node-3 redis-node-4 redis-node-5
+      - REDIS_PASSWORD=bitnami123
+      - REDIS_CLUSTER_ANNOUNCE_HOSTNAME=yes
+
 
   redis-node-0:
     <<: *redis-node-config # Use the anchor
